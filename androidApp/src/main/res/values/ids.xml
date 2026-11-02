@@ -1,0 +1,9 @@
+<resources>
+    <item name="practice_input" type="id"/>
+    <item name="practice_scroll" type="id"/>
+    <item name="model_m2m" type="id"/>
+    <item name="model_opus" type="id"/>
+    <item name="keyboard_translation_card" type="id"/>
+    <item name="keyboard_space_key" type="id"/>
+    <item name="keyboard_language_key" type="id"/>
+</resources>

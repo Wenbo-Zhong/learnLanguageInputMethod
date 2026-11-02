@@ -1,0 +1,17 @@
+<resources>
+    <color name="ime_primary">#CFBDFE</color>
+    <color name="ime_on_primary">#36275D</color>
+    <color name="ime_primary_container">#4D3D75</color>
+    <color name="ime_on_primary_container">#E9DDFF</color>
+    <color name="ime_secondary_container">#4A4458</color>
+    <color name="ime_on_secondary_container">#E8DEF8</color>
+    <color name="ime_surface">#141218</color>
+    <color name="ime_on_surface">#E6E0E9</color>
+    <color name="ime_on_surface_variant">#CAC4D0</color>
+    <color name="ime_surface_container">#211F26</color>
+    <color name="ime_surface_container_low">#1D1B20</color>
+    <color name="ime_surface_container_lowest">#0F0D13</color>
+    <color name="ime_surface_container_high">#2B2930</color>
+    <color name="ime_outline_variant">#49454F</color>
+    <bool name="ime_light_system_bars">false</bool>
+</resources>

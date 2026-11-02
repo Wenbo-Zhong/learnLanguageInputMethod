@@ -1,0 +1,8 @@
+用于本地中译英：
+
+- 模型：Helsinki-NLP/opus-mt_tiny_zho-eng
+- 版本：Hugging Face revision 4ee3a93
+- 模型格式：LiteRT/TensorFlow Lite（model.tflite）
+- 分词：SentencePiece source.spm / target.spm
+- 许可：Apache-2.0
+- 文件 SHA256：见模型目录 SHA256SUMS

@@ -1,0 +1,3 @@
+<input-method xmlns:android="http://schemas.android.com/apk/res/android" android:settingsActivity="dev.learnime.android.KeyboardSettingsActivity" android:supportsSwitchingToNextInputMethod="true">
+    <subtype android:label="对照英语" android:imeSubtypeLocale="zh_CN" android:imeSubtypeMode="keyboard"/>
+</input-method>

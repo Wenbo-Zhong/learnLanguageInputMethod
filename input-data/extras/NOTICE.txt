@@ -1,0 +1,14 @@
+对照英语输入法：开源组件与数据
+
+libime 0.4.0 — LGPL-2.1-or-later；词库/语言模型来自 libime 官方数据。
+SymSpellPy 6.10.1 英文词频词典 — MIT，许可证见 symspellpy-6.10.1-LICENSE.txt。
+英文辅助复用其词频数据，按删除、插入、替换和相邻交换检索拼写候选。
+OpenCC Python reimplementation 0.1.7 STCharacters/STPhrases — Apache-2.0；
+转换实现采用词组最长匹配后逐字匹配。许可证见 opencc-0.1.7-LICENSE.txt。
+Zinnia 0.06 — BSD-3-Clause，Copyright (c) 2009 Taku Kudo。
+完整源代码和许可证保存在 third_party/zinnia，可修改、重新构建。
+Tegaki simplified Chinese model 0.3 — LGPL-2.1，完整模型及许可随应用分发。
+Vosk Android 与 small-cn-0.22 模型 — Apache-2.0，模型来源 alphacephei.com。
+SentencePiece / ONNX Runtime / M2M100 / OPUS：沿用现有翻译组件许可与 MODEL-SOURCE.md。
+
+固定下载地址与 SHA-256 见 SOURCES.json。应用不上传词典、笔画或录音。

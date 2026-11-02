@@ -1,0 +1,75 @@
+name: LearnIME
+options:
+  bundleIdPrefix: dev.learnime
+  deploymentTarget:
+    iOS: "16.0"
+packages:
+  LiteRT:
+    path: Packages/LiteRTSwift
+settings:
+  base:
+    ARCHS: arm64
+    SWIFT_VERSION: "5.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: NO
+    CODE_SIGN_STYLE: Automatic
+    GENERATE_INFOPLIST_FILE: YES
+targets:
+  LearnIME:
+    type: application
+    platform: iOS
+    sources: [App]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.learnime.app
+        INFOPLIST_FILE: App/Info.plist
+    dependencies:
+      - target: LearningKeyboard
+  LearningKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Keyboard
+      - path: ../input-data/libime
+        type: folder
+        buildPhase: resources
+      - path: ../third_party/LIBIME-SOURCES.md
+        buildPhase: resources
+      - path: Resources/LICENSE-SentencePiece.txt
+        buildPhase: resources
+      - path: Resources/LICENSE-LiteRT.txt
+        buildPhase: resources
+      - path: ../androidApp/src/main/assets/notices/LICENSE-OPUS-MT.txt
+        buildPhase: resources
+      - path: ../androidApp/src/main/assets/notices/MODEL-SOURCE.txt
+        buildPhase: resources
+      - path: ../models/opus-mt-tiny-zho-eng/model.tflite
+        buildPhase: resources
+      - path: ../models/opus-mt-tiny-zho-eng/source.spm
+        buildPhase: resources
+      - path: ../models/opus-mt-tiny-zho-eng/target.spm
+        buildPhase: resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.learnime.app.keyboard
+        INFOPLIST_FILE: Keyboard/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: Keyboard/Bridge.h
+        HEADER_SEARCH_PATHS: "$(SRCROOT)/../native/include"
+        FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"
+        LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../native/build/$(PLATFORM_NAME)-ninja/lib"
+        OTHER_LDFLAGS: ["$(inherited)", "-framework", "Shared", "-llearnime-pinyin", "-llearnime-libime-pinyin", "-llearnime-libime-core", "-llearnime-kenlm", "-llearnime-fcitx-utils", "-llearnime-boost-iostreams", "-lzstd", "-llearnime-sentencepiece", "-lsentencepiece", "-lc++"]
+        APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      - package: LiteRT
+        product: TensorFlowLite
+    preBuildScripts:
+      - name: Build shared Kotlin framework
+        script: 'cd "$SRCROOT/.." && ./gradlew :shared:embedAndSignAppleFrameworkForXcode'
+        basedOnDependencyAnalysis: false
+      - name: Build local inference
+        script: 'cd "$SRCROOT/.." && bash scripts/build-ios-native.sh "$PLATFORM_NAME"'
+        basedOnDependencyAnalysis: false
+schemes:
+  LearnIME:
+    build:
+      targets:
+        LearnIME: all
