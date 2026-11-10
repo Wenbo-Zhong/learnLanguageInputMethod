@@ -396,19 +396,9 @@ class LearningKeyboardService : InputMethodService() {
         return result
     }
     private fun row(parent: LinearLayout, labels: List<String>, height: Int = keyHeight, action: (String) -> Unit) {
-        val row = LinearLayout(ui.context).apply {
-            isBaselineAligned = false
-            if (labels.size == 9 && labels.first() != "⇧" && labels.first() != "分词") setPadding(17.dp, 0, 17.dp, 0)
+        AndroidKeyboardLayout.row(parent, labels, height) { label ->
+            if (label == "🌐") languageKey() else button(label) { action(label) }
         }
-        labels.forEach { label ->
-            row.addView(if (label == "🌐") languageKey() else button(label) { action(label) }, LinearLayout.LayoutParams(0, height - 4.dp, when {
-                label == "空格" -> 4f
-                label in listOf("⇧", "分词", "⌫") && labels.size == 9 -> 1.4f
-                else -> 1f
-            }).apply { setMargins(2.dp, 2.dp, 2.dp, 2.dp) })
-            if (label.isEmpty()) row.getChildAt(row.childCount - 1).visibility = View.INVISIBLE
-        }
-        parent.addView(row, LinearLayout.LayoutParams(-1, height))
     }
     private fun chineseMode(): KeyboardMode {
         val saved = preferences.getString("chineseMode", preferences.getString("mode", null))
@@ -459,9 +449,7 @@ class LearningKeyboardService : InputMethodService() {
         }
         if (preferences.getBoolean("numberRow", false) || sensitive) row(keys, "1234567890".map { it.toString() }, if (landscape) 24.dp else 36.dp) { literal(it) }
         when {
-            session.symbols -> (if (session.mode == KeyboardMode.ENGLISH)
-                listOf("1234567890", "@#$%&*()-+", ".,?!:;\"'/_")
-                else listOf("1234567890", "@#￥%&*()-+", "，。？！：；“”《》")).forEach { letters ->
+            session.symbols -> KeyboardKeymap.symbolRows(session.mode == KeyboardMode.ENGLISH).forEach { letters ->
                 row(keys, letters.map { it.toString() }) { literal(it) }
             }
             session.mode == KeyboardMode.CHINESE_NINE_KEY -> {
@@ -469,7 +457,7 @@ class LearningKeyboardService : InputMethodService() {
                 return
             }
             else -> {
-                listOf("qwertyuiop", "asdfghjkl").forEach { letters ->
+                KeyboardKeymap.letterRows().forEach { letters ->
                     row(keys, letters.map { if (session.mode == KeyboardMode.ENGLISH && session.uppercase) it.uppercase() else it.toString() }) { type(it.lowercase()) }
                 }
                 row(keys, listOf(if (session.mode == KeyboardMode.ENGLISH) "⇧" else "分词") +
@@ -558,59 +546,30 @@ class LearningKeyboardService : InputMethodService() {
     }
     private fun renderNineKeys() {
         val height = if (landscape) 38.dp else (preferences.getInt("keyHeight", 54) - 2).dp
-        val body = LinearLayout(ui.context).apply { isBaselineAligned = false }
         nineSpellings = LinearLayout(ui.context).apply { orientation = LinearLayout.VERTICAL }
-        body.addView(ScrollView(ui.context).apply {
-            isVerticalScrollBarEnabled = false
-            addView(nineSpellings)
-        }, LinearLayout.LayoutParams(52.dp, height * 3))
-        val center = LinearLayout(ui.context).apply { orientation = LinearLayout.VERTICAL }
-        listOf(listOf("分词", "ABC", "DEF"), listOf("GHI", "JKL", "MNO"),
-            listOf("PQRS", "TUV", "WXYZ")).forEachIndexed { rowIndex, labels ->
-            val line = LinearLayout(ui.context).apply { isBaselineAligned = false }
-            labels.forEachIndexed { column, label ->
-                val digit = rowIndex * 3 + column + 1
-                line.addView(ui.button(label, ui.lowest, ui.onSurface, 8, 21f) {
-                    feedback(label)
-                    type(if (digit == 1) "'" else digit.toString())
-                }.apply {
-                    contentDescription = if (digit == 1) "拼音分词" else "$digit $label"
-                    setOnLongClickListener { literal(digit.toString()); true }
-                }, LinearLayout.LayoutParams(0, height - 4.dp, 1f).apply { setMargins(2.dp, 2.dp, 2.dp, 2.dp) })
-            }
-            center.addView(line, LinearLayout.LayoutParams(-1, height))
-        }
-        body.addView(center, LinearLayout.LayoutParams(0, -2, 1f))
-        val right = LinearLayout(ui.context).apply { orientation = LinearLayout.VERTICAL }
-        listOf("⌫", "清除", "123").forEach { label ->
-            right.addView(button(label) {
+        val side = listOf("⌫", "清除", "123").map { label ->
+            button(label) {
                 when (label) {
                     "⌫" -> backspace()
                     "清除" -> queueEdit { session.clearComposition(); requestCandidates() }
                     else -> queueEdit { session.toggleSymbols(); renderKeys(); renderCandidates() }
                 }
-            }, LinearLayout.LayoutParams(-1, height - 4.dp).apply { setMargins(2.dp, 2.dp, 2.dp, 2.dp) })
+            }
         }
-        body.addView(right, LinearLayout.LayoutParams(52.dp, -2))
-        keys.addView(body)
-        val bottom = LinearLayout(ui.context).apply { isBaselineAligned = false }
-        fun side(view: View) {
-            bottom.addView(view, LinearLayout.LayoutParams(52.dp - 4.dp, height - 4.dp)
-                .apply { setMargins(2.dp, 2.dp, 2.dp, 2.dp) })
-        }
-        side(button("符") { queueEdit { session.toggleSymbols(); renderKeys(); renderCandidates() } })
-        val bottomCenter = LinearLayout(ui.context).apply { isBaselineAligned = false }
-        fun add(view: View, weight: Float) {
-            bottomCenter.addView(view, LinearLayout.LayoutParams(0, height - 4.dp, weight)
-                .apply { setMargins(2.dp, 2.dp, 2.dp, 2.dp) })
-        }
-        add(button("，") { literal("，") }, 1f)
-        add(languageKey(), 1f)
-        add(button("空格") { space() }, 3.5f)
-        add(button("。") { literal("。") }, 1f)
-        bottom.addView(bottomCenter, LinearLayout.LayoutParams(0, height, 1f))
-        side(button(enterLabel()) { enter() })
-        keys.addView(bottom, LinearLayout.LayoutParams(-1, height))
+        AndroidKeyboardLayout.nine(keys, nineSpellings!!, KeyboardKeymap.nineRows(), height,
+            key = { rowIndex, column, label ->
+                val digit = rowIndex * 3 + column + 1
+                ui.button(label, ui.lowest, ui.onSurface, 8, 21f) {
+                    feedback(label)
+                    type(KeyboardKeymap.nineDigit(rowIndex, column))
+                }.apply {
+                    contentDescription = if (digit == 1) "拼音分词" else "$digit $label"
+                    setOnLongClickListener { literal(digit.toString()); true }
+                }
+            }, side = side, bottom = listOf(button("，") { literal("，") }, languageKey(),
+                button("空格") { space() }, button("。") { literal("。") }),
+            left = button("符") { queueEdit { session.toggleSymbols(); renderKeys(); renderCandidates() } },
+            right = button(enterLabel()) { enter() })
         if (inputScene == "email" || inputScene == "url")
             row(keys, if (inputScene == "email") listOf("@", ".", "_", "-", ".com") else listOf("/", ".", ":", "-", ".com"),
                 if (landscape) 28.dp else 36.dp) { literal(it) }
@@ -904,7 +863,9 @@ class LearningKeyboardService : InputMethodService() {
         if (candidate != expected) return
         val revision = session.revision
         queueEdit {
-            if (revision != session.revision || !pinyin.select(candidate, !sensitive && preferences.getBoolean("learning", true)) || revision != session.revision) return@queueEdit
+            if (!KeyboardPolicy.canChoose(session, candidate, revision, index) ||
+                !pinyin.select(candidate, !sensitive && preferences.getBoolean("learning", true)) ||
+                !KeyboardPolicy.canChoose(session, candidate, revision, index)) return@queueEdit
             trace("choose token=${candidate.token} index=${candidate.nativeIndex} consumed=${candidate.consumed} learn=${!sensitive}")
             expandedCandidates = false
             commit(outputText(session.choose(index))); requestCandidates()
@@ -1130,8 +1091,8 @@ class LearningKeyboardService : InputMethodService() {
         super.onDestroy()
     }
     private fun syncComposing() {
-        val raw = if (handwritingWord.isNotEmpty()) handwritingWord else if (englishWord.isNotEmpty()) englishWord else
-            if (preferences.getBoolean("inline", false) && !sensitive) session.composition else ""
+        val raw = KeyboardPolicy.markedText(englishWord, handwritingWord, session.composition,
+            preferences.getBoolean("inline", false), sensitive)
         if (raw.isNotEmpty()) {
             if (!composing) composingStart = minOf(selectionStart, selectionEnd)
             currentInputConnection?.setComposingText(raw, 1); composing = true
@@ -1162,7 +1123,7 @@ class LearningKeyboardService : InputMethodService() {
     private fun autoCapitalization() {
         if (session.mode != KeyboardMode.ENGLISH || capsLock || sensitive || inputScene != "text" || !preferences.getBoolean("autoCap", true)) return
         val before = currentInputConnection?.getTextBeforeCursor(80, 0)?.toString().orEmpty()
-        val capital = before.isEmpty() || before.endsWith("\n") || before.trimEnd().lastOrNull() in listOf('.', '!', '?', '。', '！', '？')
+        val capital = KeyboardPolicy.capitalize(before)
         if (session.uppercase != capital) session.toggleShift()
     }
     private fun space() = queueEdit {
@@ -1179,14 +1140,13 @@ class LearningKeyboardService : InputMethodService() {
             finishEnglish(result)
             val now = android.os.SystemClock.uptimeMillis()
             val previous = currentInputConnection?.getTextBeforeCursor(3, 0)?.toString().orEmpty()
-            if (preferences.getBoolean("doubleSpace", false) && now - lastSpace < 400 &&
-                previous.endsWith(" ") && previous.dropLast(1).lastOrNull()?.isLetterOrDigit() == true) {
+            if (preferences.getBoolean("doubleSpace", false) && KeyboardPolicy.doubleSpace(previous, now - lastSpace)) {
                 currentInputConnection?.deleteSurroundingTextInCodePoints(1, 0); commit(". ")
             } else commit(" ")
             lastSpace = now; autoCapitalization(); renderKeys(); renderCandidates()
         } else if (session.composition.isEmpty() && preferences.getBoolean("doubleSpace", false)) {
             val now = android.os.SystemClock.uptimeMillis()
-            if (now - lastSpace < 400 && currentInputConnection?.getTextBeforeCursor(1, 0)?.toString() == " ") {
+            if (KeyboardPolicy.doubleSpace(currentInputConnection?.getTextBeforeCursor(3, 0)?.toString().orEmpty(), now - lastSpace)) {
                 currentInputConnection?.deleteSurroundingTextInCodePoints(1, 0); commit("。")
             } else commit(" ")
             lastSpace = now
@@ -1313,7 +1273,7 @@ class LearningKeyboardService : InputMethodService() {
                 "←" -> moveCursor(-1); "→" -> moveCursor(1)
                 "按词删除" -> queueEdit {
                     val text = currentInputConnection?.getTextBeforeCursor(200, 0)?.toString().orEmpty()
-                    val count = Regex("(?:\\s+|[\\p{L}\\p{N}]+\\s*|[^\\p{L}\\p{N}\\s])$").find(text)?.value.orEmpty()
+                    val count = KeyboardPolicy.deleteWord(text)
                     currentInputConnection?.deleteSurroundingTextInCodePoints(count.codePointCount(0, count.length), 0); updateTranslation()
                 }
                 else -> queueEdit {
@@ -1327,17 +1287,7 @@ class LearningKeyboardService : InputMethodService() {
         }
     }
     private fun symbolPanel(panel: LinearLayout, emoji: Boolean) {
-        val groups = if (emoji) linkedMapOf(
-            "最近" to "", "开心" to "😀 😃 😄 😁 😆 😂 🤣 😊 😍 🥰 😘",
-            "难过" to "🥲 😔 😢 😭 😞 😣 😡 🤔 🙄 😴",
-            "手势" to "👍 👎 👏 🙌 🤝 🙏 💪 👌 ✌️ 🤞",
-            "生活" to "❤️ 💔 🎉 🎂 🎁 🌹 🌞 🌙 🔥 🍎 ☕ 🚗 🏠"
-        ) else linkedMapOf(
-            "最近" to "", "中文" to "， 。 ？ ！ ： ； 、 … — · 「 」 『 』 《 》 【 】 （ ）",
-            "英文" to ", . ? ! : ; ' \" @ # $ % & * ( ) [ ] { } / \\ _ - + =",
-            "数学" to "＋ − × ÷ ＝ ≠ ≈ ≤ ≥ ± ∞ √ π ² ³ ％ ℃ °",
-            "常用" to "© ® ™ → ← ↑ ↓ ★ ☆ ✓ ✕ ● ○ ※ ¥ € £"
-        )
+        val groups = KeyboardSymbols.categories(emoji)
         val groupScroll = HorizontalScrollView(ui.context)
         val tabs = LinearLayout(ui.context); groupScroll.addView(tabs); panel.addView(groupScroll)
         val body = LinearLayout(ui.context).apply { orientation = LinearLayout.VERTICAL }
@@ -1345,33 +1295,26 @@ class LearningKeyboardService : InputMethodService() {
         val recentKey = if (emoji) "recentEmoji" else "recentSymbols"
         fun use(value: String) {
             literal(value)
-            val recent = preferences.getString(recentKey, "").orEmpty().split(' ')
-            preferences.edit().putString(recentKey, (listOf(value) +
-                recent.filter { it.isNotEmpty() && it != value }).take(30).joinToString(" ")).apply()
+            preferences.edit().putString(recentKey,
+                KeyboardSymbols.remember(value, preferences.getString(recentKey, "").orEmpty())).apply()
         }
         fun render(category: String) {
             body.removeAllViews()
-            val values = if (category == "最近") preferences.getString(recentKey, "").orEmpty().split(' ').filter { it.isNotEmpty() }
-                else groups[category].orEmpty().split(' ').filter { it.isNotEmpty() }
+            val values = KeyboardSymbols.values(emoji, category, preferences.getString(recentKey, "").orEmpty())
             values.chunked(6).forEach { line -> row(body, line, 44.dp) { value ->
                 use(value)
             } }
             if (values.isEmpty()) body.addView(ui.text("暂无最近使用", 14f, ui.muted))
         }
-        groups.keys.forEach { label -> tabs.addView(ui.button(label, ui.high, ui.onSurface, 10, 13f) { render(label) }, LinearLayout.LayoutParams(60.dp, 36.dp)) }
+        groups.forEach { label -> tabs.addView(ui.button(label, ui.high, ui.onSurface, 10, 13f) { render(label) }, LinearLayout.LayoutParams(60.dp, 36.dp)) }
         if (emoji) {
             val categories = LinearLayout(ui.context)
             panel.addView(categories, 1)
             panel.addView(ui.text("按关键词筛选", 12f, ui.muted), 1)
             // Search terms are selectable so the panel never opens another IME over itself.
-            listOf("笑", "哭", "爱", "庆祝").forEach { keyword ->
+            KeyboardSymbols.keywords().forEach { keyword ->
                 categories.addView(ui.button(keyword, ui.high, ui.onSurface, 10, 12f) {
-                    val matches = when (keyword) {
-                        "笑" -> listOf("😀", "😃", "😄", "😁", "😆", "😂", "🤣", "😊")
-                        "哭" -> listOf("🥲", "😢", "😭")
-                        "爱" -> listOf("❤️", "😍", "🥰", "😘")
-                        else -> listOf("🎉", "🎂", "🎁", "👏")
-                    }
+                    val matches = KeyboardSymbols.keywordValues(keyword)
                     body.removeAllViews(); matches.chunked(6).forEach { line -> row(body, line, 44.dp) { use(it) } }
                 }, LinearLayout.LayoutParams(0, 34.dp, 1f))
             }
@@ -1430,9 +1373,7 @@ class LearningKeyboardService : InputMethodService() {
                         }, LinearLayout.LayoutParams(56.dp, -1))
                     }
                     if (choices.isNotEmpty()) {
-                        delay(when (preferences.getString("handwritingSpeed", "normal")) {
-                            "fast" -> 600L; "slow" -> 1600L; else -> 1000L
-                        })
+                        delay(KeyboardPolicy.handwritingDelay(preferences.getString("handwritingSpeed", "normal") ?: "normal"))
                         val text = outputText(choices.first())
                         if (current != handwritingRevision || epoch != editorEpoch || !handwritingMode) return@launch
                         handwritingWord = text

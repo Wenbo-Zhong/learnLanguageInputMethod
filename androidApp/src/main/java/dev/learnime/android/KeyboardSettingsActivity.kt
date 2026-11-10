@@ -106,7 +106,7 @@ class KeyboardSettingsActivity : Activity() {
                 dialog.setOnShowListener {
                     dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                         val abbreviation = key.text.toString().trim()
-                        if (!abbreviation.matches(Regex("(?:[a-z]{1,20}|[2-9]{1,20})"))) { key.error = "使用小写字母或 2–9 数字"; return@setOnClickListener }
+                        if (!dev.learnime.shared.KeyboardPolicy.validShortcut(abbreviation, value.text.toString())) { key.error = "使用小写字母或 2–9 数字，填写有效短语"; return@setOnClickListener }
                         if (value.text.isBlank() || value.text.length > 1000) { value.error = "填写 1–1000 字短语"; return@setOnClickListener }
                         oldKey?.let { data.remove(it) }; data.put(abbreviation, value.text.toString())
                         prefs.edit().putString("shortcuts", data.toString()).apply(); dialog.dismiss(); shortcuts()
