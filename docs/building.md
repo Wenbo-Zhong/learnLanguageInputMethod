@@ -42,11 +42,74 @@ Release signing requires your own signing configuration; no keys are supplied.
 
 ## iOS
 
-Requirements: macOS, Xcode, XcodeGen, JDK 17 and the prepared OPUS/libime data.
+Requirements: macOS, Xcode, XcodeGen, JDK 17 and prepared M2M/OPUS/libime/extras data.
 Use `iosApp/project.yml` to generate the Xcode project and
 `scripts/build-ios-native.sh` to build the native libraries.
-Configure your own development team in Xcode. Android extras such as the new
-handwriting and speech panels have not been ported to iOS.
+Configure your own development team in Xcode for physical devices.
+The iOS build copies English/OpenCC data and the Zinnia handwriting model;
+the Android Vosk microphone pipeline is not available to iOS keyboard extensions.
+
+For simulator testing, select your full Xcode developer directory and JDK first:
+
+```sh
+export DEVELOPER_DIR=/path/to/Xcode.app/Contents/Developer
+export JAVA_HOME=/path/to/jdk
+xcodebuild -downloadPlatform iOS -architectureVariant arm64
+```
+
+Generate and build the app and UI tests:
+
+```sh
+# First prepare Android M2M resources using the commands above, then serialize
+# the same graphs for the exact iOS runtime in a separate Python environment.
+python3 -m venv /tmp/learnime-ios-model-tools
+/tmp/learnime-ios-model-tools/bin/pip install onnxruntime==1.23.0
+/tmp/learnime-ios-model-tools/bin/python scripts/prepare-ios-m2m.py
+bash scripts/setup-ios-ort.sh
+xcodegen generate --spec iosApp/project.yml
+xcodebuild -project iosApp/LearnIME.xcodeproj -scheme LearnIME \
+  -configuration Debug -destination 'generic/platform=iOS Simulator' \
+  -derivedDataPath /tmp/learnime-ios-simulator-build \
+  CODE_SIGNING_ALLOWED=NO build-for-testing
+python3 scripts/prepare-ios-simulator.py --test
+```
+
+The script creates/reuses `LearnIME Test iPhone`, boots it, installs the app and
+runs real keyboard UI tests. Simulator settings use English system labels;
+the test enables 对照英语 in Settings and switches to it in the practice editor.
+No physical iPhone or development signing is required. `--wait` waits for an
+already running runtime download; it does not start another download.
+
+M2M100 is bundled once in the containing app and is the default backend.
+`LearnIMEM2M` wraps the pinned ORT static library in a dynamic framework, exposing
+only the C adapter symbols so ORT and LiteRT do not collide on XNNPACK symbols.
+The generated model manifest records source and ORT SHA256 hashes.
+
+The translation integration probe uses the production Swift engine, shared beam
+search and native tokenizer without XCTest. It checks both directions, in-flight
+cancellation, newest-request completion and unloading/reloading. After building,
+substitute the simulator UDID:
+
+```sh
+bash scripts/verify-ios-translation.sh \
+  /tmp/learnime-ios-simulator-build/Build/Products/Debug-iphonesimulator \
+  <simulator-udid> default
+```
+
+Use `cpu` to verify the retained OPUS backend, or `gpu` to reproduce its Metal
+experiment. The keyboard's
+“Metal GPU 翻译（实验）” setting is off by default. LiteRT and its accelerator
+are pinned to 2.3.0 with checksums and embedded in the containing iOS app.
+GPU initialization/execution failures do not produce a success label.
+The current simulator model fails Metal graph compilation; CPU translation
+remains available. Simulator timing and footprint do not establish physical
+iPhone performance or compliance with the keyboard extension's memory limit.
+
+Original app artwork can be regenerated with Pillow:
+
+```sh
+python3 scripts/generate-app-icons.py
+```
 
 ## Source changes and licenses
 

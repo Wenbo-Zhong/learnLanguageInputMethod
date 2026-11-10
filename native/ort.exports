@@ -1,0 +1,12 @@
+_li_ort_error
+_li_ort_create
+_li_ort_destroy
+_li_ort_cancel
+_li_ort_begin
+_li_ort_tensor
+_li_ort_value_destroy
+_li_ort_run
+_li_ort_output
+_li_ort_result_destroy
+_li_ort_top_tokens
+_li_ort_footprint

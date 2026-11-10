@@ -41,9 +41,10 @@ Debug APK 位于 `androidApp/build/outputs/apk/debug/androidApp-debug.apk`，
 
 ## 实现与限制
 
-Android 翻译默认使用 M2M100 418M 的 INT8 ONNX 转换与电脑端预优化解码器，
+Android 和 iOS 翻译默认使用 M2M100 418M 的 INT8 ONNX 转换与电脑端预优化解码器，
 ONNX Runtime 本地运行；可切换到保留的 OPUS-MT tiny／LiteRT。
-iOS 当前使用 OPUS-MT tiny／LiteRT。模型转换来源和校验记录在 `models/` 中。
+iOS 将同一组权重转为 ORT 格式后随包携带，通过文件映射读取，
+两端共用 KMP 的 5 束搜索逻辑。模型转换来源和校验记录在 `models/` 中。
 
 手写使用 Zinnia／Tegaki 单字模型，支持逐字连续写；候选准确率仍有限，
 不支持并排多字自动分割。语音使用 small-cn 离线模型，口音和噪声条件下的

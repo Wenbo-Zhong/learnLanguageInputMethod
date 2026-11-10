@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+bash scripts/prepare-ios-extras.sh
 platform="${1:-iphoneos}"
 case "$platform" in iphoneos|iphonesimulator) ;; *) echo "Unsupported platform: $platform" >&2; exit 1;; esac
 build="native/build/$platform-ninja"
@@ -11,4 +12,4 @@ cmake -S native -B "$build" -G Ninja \
   -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY="$PWD/$build/lib" \
   -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_DEBUG="$PWD/$build/lib" \
   -DCMAKE_ARCHIVE_OUTPUT_DIRECTORY_RELEASE="$PWD/$build/lib"
-cmake --build "$build" --config "${CONFIGURATION:-Debug}" --target learnime-sentencepiece learnime-pinyin --parallel 4
+cmake --build "$build" --config "${CONFIGURATION:-Debug}" --target learnime-sentencepiece learnime-pinyin learnime-handwriting --parallel 4

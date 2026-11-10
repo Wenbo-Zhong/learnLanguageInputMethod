@@ -9,6 +9,7 @@ import android.os.SystemClock
 import android.util.Log
 import dev.learnime.shared.TranslationEngine
 import dev.learnime.shared.TranslationDirection
+import dev.learnime.shared.M2mBeamSearch
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -99,59 +100,40 @@ internal class M2mEngine(context: Context) : TranslationEngine {
                     OnnxTensor.createTensor(environment, FloatBuffer.allocate(0), longArrayOf(1, 16, 0, 64)).use { empty ->
                         // The uncached first step computes the cross-attention keys/values.
                         val first = step(EOS, false, hidden, mask, empty, null, null, run)
-                        val live = mutableSetOf<OrtSession.Result>()
+                        val live = mutableMapOf<Int, OrtSession.Result>()
                         try {
                             // Match config.json: num_beams=5, length_penalty=1, early_stopping=true.
                             // Each child's state contains its parent's tokens, before its final token.
-                            var beams = listOf(Beam(0.0, listOf(targetId), first))
-                            val finished = mutableListOf<Completion>()
+                            val search = M2mBeamSearch(targetId)
+                            var stateId = 1
                             for (position in 0 until MAX_OUTPUT_TOKENS) {
-                                val candidates = ArrayList<Beam>()
-                                for (beam in beams) {
+                                for (beam in search.beams) {
                                     checkCurrent(request)
-                                    val next = step(beam.tokens.last(), true, hidden, mask, empty, first, beam.state, run)
-                                    live += next
+                                    val next = step(beam.lastToken, true, hidden, mask, empty, first,
+                                        if (beam.state == 0) first else live.getValue(beam.state), run)
+                                    val state = stateId++
+                                    live[state] = next
                                     for ((token, probability) in topTokens(next.tensor("logits"))) {
-                                        candidates += Beam(beam.score + probability, beam.tokens + token, next)
+                                        search.add(beam, token, probability, state)
                                     }
                                 }
-                                candidates.sortByDescending { it.score }
-                                val nextBeams = ArrayList<Beam>(BEAM_WIDTH)
-                                for ((rank, candidate) in candidates.withIndex()) {
-                                    if (candidate.tokens.last() == EOS) {
-                                        if (rank < BEAM_WIDTH) {
-                                            finished += Completion(
-                                                // Decoder prompt is EOS; generated length includes forced target BOS.
-                                                candidate.score / candidate.tokens.size,
-                                                candidate.tokens.drop(1).dropLast(1),
-                                            )
-                                        }
-                                    } else {
-                                        nextBeams += candidate
-                                    }
-                                    if (nextBeams.size == BEAM_WIDTH) break
-                                }
-                                finished.sortByDescending { it.score }
-                                if (finished.size > BEAM_WIDTH) finished.subList(BEAM_WIDTH, finished.size).clear()
-                                if (finished.size == BEAM_WIDTH || nextBeams.isEmpty()) {
+                                search.advance()
+                                if (search.done) {
                                     checkCurrent(request)
-                                    val output = finished.firstOrNull()?.tokens
-                                        ?: error("翻译未能生成完整结果，请重试")
+                                    val output = search.output
                                     Log.i(TAG, "decoded output_tokens=${output.size} beams=$BEAM_WIDTH steps=${position + 1}")
                                     val pieces = output.filter { it > 3 }.map { outputPieces[it] }.toTypedArray()
                                     val decoded = NativeSentencePiece.decodePieces(tokenizer, pieces)
                                         ?: error("M2M100 译文解码失败")
                                     return decoded.toString(Charsets.UTF_8).trim()
                                 }
-                                val retained = nextBeams.map { it.state }.toSet()
-                                val obsolete = live.filter { it !in retained }
-                                obsolete.forEach { it.close(); live.remove(it) }
-                                beams = nextBeams
+                                val obsolete = live.keys.filter { !search.retains(it) }
+                                obsolete.forEach { live.remove(it)?.close() }
                             }
-                            Log.w(TAG, "generation_limit input_tokens=${ids.size} beams=$BEAM_WIDTH steps=$MAX_OUTPUT_TOKENS completed=${finished.size}")
+                            Log.w(TAG, "generation_limit input_tokens=${ids.size} beams=$BEAM_WIDTH steps=$MAX_OUTPUT_TOKENS")
                             error("翻译未能生成完整结果，请重试")
                         } finally {
-                            live.forEach { it.close() }
+                            live.values.forEach { it.close() }
                             first.close()
                         }
                     }
@@ -187,9 +169,6 @@ internal class M2mEngine(context: Context) : TranslationEngine {
     private fun OrtSession.Result.tensor(name: String) = get(name).orElseThrow {
         IllegalStateException("M2M100 输出缺失：$name")
     } as OnnxTensor
-
-    private data class Beam(val score: Double, val tokens: List<Int>, val state: OrtSession.Result)
-    private data class Completion(val score: Double, val tokens: List<Int>)
 
     private fun topTokens(tensor: OnnxTensor): List<Pair<Int, Double>> {
         val values = tensor.floatBuffer

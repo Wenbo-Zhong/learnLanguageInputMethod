@@ -9,6 +9,8 @@ li_sentencepiece *li_sentencepiece_create(const char *model_path);
 void li_sentencepiece_destroy(li_sentencepiece *processor);
 int li_sentencepiece_encode(li_sentencepiece *processor, const char *text, int32_t *output, size_t capacity);
 char *li_sentencepiece_decode(li_sentencepiece *processor, const int32_t *ids, size_t count);
+int li_sentencepiece_encode_utf8(li_sentencepiece *, const char *text, size_t length, int32_t *output, size_t capacity);
+char *li_sentencepiece_decode_pieces(li_sentencepiece *, const char *const *pieces, const size_t *lengths, size_t count);
 void li_sentencepiece_free(void *memory);
 #ifdef __cplusplus
 }

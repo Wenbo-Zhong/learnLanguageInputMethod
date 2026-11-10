@@ -1,4 +1,4 @@
-# M2M100 418M · Android trial
+# M2M100 418M · mobile inference
 
 Base model: https://huggingface.co/facebook/m2m100_418M
 Base repository revision: `55c2e61bbf05dfb8d7abccdc3fae6fc8512fd636`
@@ -19,9 +19,18 @@ uncompressed and loaded by memory mapping; no first-run graph optimization or
 standalone decoder cache is needed on the phone. The original OPUS-MT tiny files
 and LiteRT implementation are retained separately.
 
-Generation: Chinese source language (`128102`), forced English first decoder token
-(`128022`), EOS/start token (`2`), greedy decoding, cached attention. The original
-Hugging Face configuration defaults to 5 beams; this mobile trial uses one beam.
+Generation: Chinese language (`128102`), English language (`128022`),
+forced target language first decoder token, EOS/start token (`2`), cached
+attention, 5 beams, length penalty 1 and early stopping after 5 completions.
+Both platforms use `M2mBeamSearch` in the Kotlin shared layer.
+
+iOS serializes these same encoder/optimized-decoder graphs into ORT format with
+ONNX Runtime 1.23.0, matching the official iOS framework. Graph optimization and
+weight prepacking are disabled at runtime. Read-only mappings remain alive until
+sessions are destroyed, and ORT borrows initializer data from those mappings.
+`scripts/prepare-ios-m2m.py` records input/output SHA256 hashes in the generated
+manifest. The model files are bundled once in the containing app; the keyboard
+extension reads them there. OPUS remains a separate selectable backend.
 
 `tokenizer-map.bin` is generated deterministically from the pinned SentencePiece
 model and `vocab.json`, using `scripts/prepare-m2m-tokenizer.py`. Its big-endian

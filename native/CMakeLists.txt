@@ -49,6 +49,13 @@ if(ANDROID)
     target_link_libraries(learnime PRIVATE learnime-pinyin learnime-zinnia sentencepiece-static log)
 endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    set(ZINNIA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/zinnia")
+    add_library(learnime-handwriting STATIC handwriting.cpp
+        ${ZINNIA_DIR}/recognizer.cpp ${ZINNIA_DIR}/sexp.cpp
+        ${ZINNIA_DIR}/feature.cpp ${ZINNIA_DIR}/character.cpp)
+    target_include_directories(learnime-handwriting PUBLIC include PRIVATE ${ZINNIA_DIR})
+    target_compile_definitions(learnime-handwriting PRIVATE HAVE_SYS_TYPES_H HAVE_SYS_STAT_H
+        HAVE_FCNTL_H HAVE_STRING_H HAVE_SYS_MMAN_H HAVE_UNISTD_H HAVE_MMAP VERSION="0.06")
     add_library(learnime-sentencepiece STATIC sentencepiece.cpp)
     target_include_directories(learnime-sentencepiece PUBLIC include PRIVATE ../third_party/sentencepiece/src)
     target_link_libraries(learnime-sentencepiece PRIVATE sentencepiece-static)

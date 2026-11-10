@@ -19,7 +19,7 @@ The top-level license does not replace the licenses listed below.
 | Vosk Android / small-cn-0.22 | Apache-2.0 | Maven `com.alphacephei:vosk-android:0.3.75`; `input-data/extras/VOSK-SOURCE.json`, `vosk-Apache-2.0.txt` |
 | M2M100 / Xenova ONNX conversion | MIT | `models/m2m100-418m-int8/MODEL-SOURCE.md`, pinned download script and checksums |
 | OPUS-MT tiny Chinese-English model | Apache-2.0 | `scripts/download-opus-model.sh`, `models/opus-mt-tiny-zho-eng/SHA256SUMS` |
-| ONNX Runtime | MIT | Maven `com.microsoft.onnxruntime:onnxruntime-android:1.23.2` |
+| ONNX Runtime | MIT | Android Maven `com.microsoft.onnxruntime:onnxruntime-android:1.23.2`; iOS official 1.23.0 archive pinned in `scripts/setup-ios-ort.sh`, `iosApp/Resources/LICENSE-ONNXRuntime.txt` |
 | LiteRT / TensorFlow Lite | Apache-2.0 | Maven dependency; `iosApp/Packages/LiteRTSwift/LICENSE`, `iosApp/Resources/LICENSE-LiteRT.txt` |
 | AndroidX / Material Components / Kotlin / coroutines | Apache-2.0 | Gradle dependency coordinates in the build scripts |
 

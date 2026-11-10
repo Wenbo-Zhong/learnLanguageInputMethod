@@ -12,23 +12,61 @@ settings:
     SWIFT_VERSION: "5.0"
     ENABLE_USER_SCRIPT_SANDBOXING: NO
     CODE_SIGN_STYLE: Automatic
+    MARKETING_VERSION: "0.6.0"
+    CURRENT_PROJECT_VERSION: "11"
     GENERATE_INFOPLIST_FILE: YES
 targets:
+  LearnIMEM2M:
+    type: framework
+    platform: iOS
+    sources:
+      - path: ../native/ort.cpp
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.learnime.m2m-runtime
+        DEFINES_MODULE: NO
+        HEADER_SEARCH_PATHS: ["$(SRCROOT)/../native/include", "$(SRCROOT)/../build/ios-ort/Headers"]
+        CLANG_CXX_LANGUAGE_STANDARD: c++17
+        GCC_SYMBOLS_PRIVATE_EXTERN: YES
+        GCC_OPTIMIZATION_LEVEL: 2
+        OTHER_LDFLAGS: ["$(inherited)", "-lc++", "-Wl,-exported_symbols_list,$(SRCROOT)/../native/ort.exports"]
+        APPLICATION_EXTENSION_API_ONLY: YES
+        MARKETING_VERSION: "1.23.0"
+    dependencies:
+      - framework: ../build/ios-ort/onnxruntime.xcframework
+        embed: false
+      - sdk: Foundation.framework
+      - sdk: CoreML.framework
+      - sdk: Accelerate.framework
   LearnIME:
     type: application
     platform: iOS
-    sources: [App]
+    sources:
+      - path: App
+      - path: ../build/ios-assets/m2m100
+        type: folder
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: dev.learnime.app
         INFOPLIST_FILE: App/Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
     dependencies:
       - target: LearningKeyboard
+      - target: LearnIMEM2M
+        embed: true
+      - package: LiteRT
+        product: LiteRT
+      - package: LiteRT
+        product: LiteRtMetalAccelerator
   LearningKeyboard:
     type: app-extension
     platform: iOS
     sources:
       - path: Keyboard
+      - path: ../build/ios-assets/extras
+        type: folder
+        buildPhase: resources
       - path: ../input-data/libime
         type: folder
         buildPhase: resources
@@ -37,6 +75,8 @@ targets:
       - path: Resources/LICENSE-SentencePiece.txt
         buildPhase: resources
       - path: Resources/LICENSE-LiteRT.txt
+        buildPhase: resources
+      - path: Resources/LICENSE-ONNXRuntime.txt
         buildPhase: resources
       - path: ../androidApp/src/main/assets/notices/LICENSE-OPUS-MT.txt
         buildPhase: resources
@@ -56,11 +96,17 @@ targets:
         HEADER_SEARCH_PATHS: "$(SRCROOT)/../native/include"
         FRAMEWORK_SEARCH_PATHS: "$(SRCROOT)/../shared/build/xcode-frameworks/$(CONFIGURATION)/$(SDK_NAME)"
         LIBRARY_SEARCH_PATHS: "$(SRCROOT)/../native/build/$(PLATFORM_NAME)-ninja/lib"
-        OTHER_LDFLAGS: ["$(inherited)", "-framework", "Shared", "-llearnime-pinyin", "-llearnime-libime-pinyin", "-llearnime-libime-core", "-llearnime-kenlm", "-llearnime-fcitx-utils", "-llearnime-boost-iostreams", "-lzstd", "-llearnime-sentencepiece", "-lsentencepiece", "-lc++"]
+        OTHER_LDFLAGS: ["$(inherited)", "-framework", "Shared", "-llearnime-pinyin", "-llearnime-libime-pinyin", "-llearnime-libime-core", "-llearnime-kenlm", "-llearnime-fcitx-utils", "-llearnime-boost-iostreams", "-lzstd", "-llearnime-sentencepiece", "-lsentencepiece", "-llearnime-handwriting", "-lc++"]
         APPLICATION_EXTENSION_API_ONLY: YES
     dependencies:
+      - target: LearnIMEM2M
+        embed: false
       - package: LiteRT
         product: TensorFlowLite
+      - package: LiteRT
+        product: LiteRT
+      - package: LiteRT
+        product: LiteRtMetalAccelerator
     preBuildScripts:
       - name: Build shared Kotlin framework
         script: 'cd "$SRCROOT/.." && ./gradlew :shared:embedAndSignAppleFrameworkForXcode'
@@ -68,8 +114,21 @@ targets:
       - name: Build local inference
         script: 'cd "$SRCROOT/.." && bash scripts/build-ios-native.sh "$PLATFORM_NAME"'
         basedOnDependencyAnalysis: false
+  KeyboardParityUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [UITests]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: dev.learnime.app.uitests
+        TEST_TARGET_NAME: LearnIME
+    dependencies:
+      - target: LearnIME
 schemes:
   LearnIME:
     build:
       targets:
         LearnIME: all
+    test:
+      targets:
+        - KeyboardParityUITests
