@@ -65,6 +65,7 @@ Generate and build the app and UI tests:
 python3 -m venv /tmp/learnime-ios-model-tools
 /tmp/learnime-ios-model-tools/bin/pip install onnxruntime==1.23.0
 /tmp/learnime-ios-model-tools/bin/python scripts/prepare-ios-m2m.py
+bash scripts/prepare-ios-extras.sh
 bash scripts/setup-ios-ort.sh
 xcodegen generate --spec iosApp/project.yml
 xcodebuild -project iosApp/LearnIME.xcodeproj -scheme LearnIME \
@@ -84,6 +85,22 @@ M2M100 is bundled once in the containing app and is the default backend.
 `LearnIMEM2M` wraps the pinned ORT static library in a dynamic framework, exposing
 only the C adapter symbols so ORT and LiteRT do not collide on XNNPACK symbols.
 The generated model manifest records source and ORT SHA256 hashes.
+If the CocoaPods archive endpoint is unavailable, `setup-ios-ort.sh` uses the
+Apple XCFramework from Microsoft's pinned NuGet 1.23.0 package and verifies its
+SHA256 checksum.
+
+To compile an unsigned physical-device app without provisioning profiles:
+
+```sh
+xcodebuild -project iosApp/LearnIME.xcodeproj -scheme LearnIME \
+  -configuration Debug -destination 'generic/platform=iOS' \
+  -derivedDataPath /tmp/learnime-ios-device-build \
+  CODE_SIGNING_ALLOWED=NO build
+```
+
+Output: `/tmp/learnime-ios-device-build/Build/Products/Debug-iphoneos/LearnIME.app`.
+Physical-device installation requires development signing and a valid
+provisioning profile for the app and keyboard extension.
 
 The translation integration probe uses the production Swift engine, shared beam
 search and native tokenizer without XCTest. It checks both directions, in-flight

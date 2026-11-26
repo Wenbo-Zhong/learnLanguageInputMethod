@@ -69,6 +69,12 @@ includes the new Swift files; `project.yml` includes the entire `Keyboard`
 directory when regenerating. Full iOS packaging and device UI validation were
 not repeated because the local iOS runtime/model asset directories are absent.
 
+The subsequent full build on 2026-11-26 prepared the missing iOS assets and
+ORT 1.23.0 runtime, then compiled the Android Debug APK and the complete unsigned
+arm64 iOS app, including its keyboard extension. The Android archive and bundled
+model/input resources were checked. The iOS app passed Xcode bundle validation;
+physical-device installation and UI behavior were not exercised.
+
 iOS “中/EN” switches directly between English and the last Chinese layout.
 The toolbar switches nine-key/QWERTY directly; handwriting has its own entry.
 Nine-key letter groups use larger native-style keycaps with quieter punctuation
