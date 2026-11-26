@@ -16,12 +16,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private let engine = LocalEngine()
     private var height: NSLayoutConstraint? { layout.height }
     private var pending: DispatchWorkItem?
-    private var revision = 0, candidateRevision = 0
+    private let translationPolicy = TranslationPolicy()
+    private let candidateCoordinator = CandidateCoordinator()
+    private var candidateRevision: Int64 { candidateCoordinator.generation }
     private var candidateLoading = false
     private var deferred: (() -> Void)?
     private var editActions: [() -> Void] = []
     private var runningEdits = false
-    private var lastSource = "", lastHostContext: String?
+    private var lastHostContext: String?
     private var active = false
     private var committing = false
     private let prefs = KeyboardPreferences.store
@@ -48,10 +50,23 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var capsLock = false, lastShift = Date.distantPast, lastSpace = Date.distantPast
     private let extrasQueue = DispatchQueue(label: "dev.learnime.extras", qos: .userInitiated)
     private var dictionary: EnglishDictionary?, converter: TraditionalConverter?
-    private let clips = ClipboardHistory(), handwritingEngine = HandwritingEngine()
-    private var board: HandwritingView?, handwritingPending: DispatchWorkItem?
-    private var handwritingChoices: UIStackView?
-    private var handwritingRevision = 0, handwritingWord = "", handwritingCandidate = ""
+    private let clips = ClipboardHistory()
+    private lazy var candidatePanel = IOSCandidatePanel(menuDelegate: self,
+        button: { [weak self] title, action in self?.button(title, action: action) ?? UIButton() })
+    private lazy var panels = IOSKeyboardPanels(panel: panel, prefs: prefs, clips: clips, pasteTarget: self,
+        skin: { [weak self] in self?.palette ?? IOSKeyboardSkin(dark: false, followsSystem: true) },
+        button: { [weak self] title, action in self?.button(title, action: action) ?? UIButton() },
+        row: { [weak self] labels, height, action in self?.makeRow(labels, height: height, action: action) ?? UIStackView() },
+        action: { [weak self] in self?.panelAction($0) })
+    private lazy var handwriting = IOSHandwritingInput(prefs: prefs,
+        active: { [weak self] in self?.active == true && self?.tool == "手写" },
+        button: { [weak self] title, action in self?.button(title, action: action) ?? UIButton() },
+        output: { [weak self] in self?.output($0) ?? $0 },
+        commit: { [weak self] in self?.commit($0) },
+        syncMarked: { [weak self] in self?.syncMarked() },
+        queueEdit: { [weak self] in self?.queueEdit($0) })
+    private var handwritingWord: String { handwriting.word }
+    private var handwritingCandidate: String { handwriting.candidate }
     private var editField: Int?, draft = ["", ""], originalWord: [String]?
     private var editingShortcut = false
     private var modeBeforeForm: KeyboardMode?
@@ -384,30 +399,19 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if session.candidates.isEmpty {
             let hint = UILabel(); hint.font = .systemFont(ofSize: 12)
             hint.textColor = palette.muted
-            hint.text = candidateLoading ? "正在生成候选…" : session.composition.isEmpty ? "" : "暂无候选，空格输入原文"
+            hint.text = candidateLoading ? "正在生成候选…" : session.composition.isEmpty ? "" : "暂无候选，可退格修改或点原文"
             candidates.addArrangedSubview(hint)
-        } else {
-            for (index, candidate) in session.candidates.enumerated() {
-                let detail = session.mode != .chineseNineKey && !candidate.correction.isEmpty
-                let text = output(candidate.text)
-                let label = detail ? text + "\n" + candidate.correction + " " + candidate.spelling : text
-                let b = button(label) { [weak self] in
-                    guard let self else { return }
-                    queueEdit {
-                        guard self.session.candidates.indices.contains(index),
-                              self.session.candidates[index].isEqual(candidate) else { return }
-                        self.choose(index)
-                    }
-                }
-                b.titleLabel?.numberOfLines = 2; b.titleLabel?.textAlignment = .center
-                b.titleLabel?.font = .systemFont(ofSize: detail ? 12 : CGFloat(prefs.integer(forKey: "candidateFont")))
-                b.backgroundColor = index == 0 ? palette.selected : .clear
-                b.contentEdgeInsets = UIEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-                b.tag = index
-                b.addInteraction(UIContextMenuInteraction(delegate: self))
-                if index < 12 { candidates.addArrangedSubview(b) }
-            }
         }
+        let request = candidateCoordinator.snapshot(session: session)
+        candidatePanel.render(session.candidates, in: candidates, expanded: expanded,
+            nineKey: session.mode == .chineseNineKey, isExpanded: expandedCandidates,
+            font: CGFloat(prefs.integer(forKey: "candidateFont")), selected: palette.selected, output: output) { [weak self] index, candidate in
+                self?.queueEdit {
+                    guard let self, self.candidateCoordinator.canChoose(request: request, session: self.session,
+                        candidate: candidate, index: Int32(index)) else { return }
+                    self.choose(index)
+                }
+            }
         if prefs.bool(forKey: "mixed"), !session.composition.isEmpty, session.lockedSyllables.isEmpty {
             let value = session.composition
             candidates.addArrangedSubview(button(value) { [weak self] in self?.queueEdit {
@@ -426,20 +430,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if session.composition.isEmpty, englishWord.isEmpty {
             for word in predictions { candidates.addArrangedSubview(button(output(word)) { [weak self] in self?.commit(self?.output(word) ?? "") }) }
         }
-        if expandedCandidates {
-            for start in stride(from: 0, to: session.candidates.count, by: 3) {
-                let line = UIStackView(); line.distribution = .fillEqually; line.spacing = 4
-                for index in start..<min(start + 3, session.candidates.count) {
-                    line.addArrangedSubview(button(output(session.candidates[index].text)) { [weak self] in self?.queueEdit { self?.choose(index) } })
-                }
-                line.heightAnchor.constraint(equalToConstant: 38).isActive = true; expanded.addArrangedSubview(line)
-            }
-        }
         (candidateBar.arrangedSubviews.last as? UIButton)?.setTitle(expandedCandidates ? "收起" : "展开", for: .normal)
         resize()
     }
     private func invalidateCandidates() {
-        candidateRevision += 1; candidateLoading = false; deferred = nil; pinyin.cancel()
+        candidateCoordinator.invalidate(); candidateLoading = false; deferred = nil; pinyin.cancel()
     }
     func contextMenuInteraction(_ interaction: UIContextMenuInteraction, configurationForMenuAtLocation location: CGPoint) -> UIContextMenuConfiguration? {
         guard let index = interaction.view?.tag, session.candidates.indices.contains(index) else { return nil }
@@ -454,14 +449,15 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private func requestCandidates() {
         invalidateCandidates()
         syncMarked()
-        let input = session.composition, mode = session.mode, request = candidateRevision
-        let editRevision = session.revision, locks = session.lockSpecification, corrections = session.autoCorrection
+        let request = candidateCoordinator.snapshot(session: session)
+        let input = request.input, mode = request.mode
+        let editRevision = request.revision, locks = request.locks, corrections = request.corrections
         guard !input.isEmpty else {
             englishChoices = []; predictions = []
             if prefs.bool(forKey: "prediction"), wordInput, editField == nil, mode != .english {
                 let context = textDocumentProxy.documentContextBeforeInput ?? ""
                 pinyin.predict(context) { [weak self] words in
-                    guard let self, self.active, request == self.candidateRevision else { return }
+                    guard let self, self.active, self.candidateCoordinator.isCurrent(request: request, session: self.session) else { return }
                     self.predictions = words; self.renderCandidates()
                 }
             }
@@ -469,8 +465,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
         candidateLoading = true; renderCandidates()
         pinyin.search(input: input, nine: mode == .chineseNineKey, locks: locks, corrections: corrections) { [weak self] result in
-            guard let self, active, request == candidateRevision, session.revision == editRevision,
-                  session.composition == input, session.mode == mode else { return }
+            guard let self, active, candidateCoordinator.isCurrent(request: request, session: session) else { return }
             candidateLoading = false
             switch result {
             case .success(let list): _ = session.applyCandidates(input: input, inputMode: mode, result: list, inputRevision: editRevision); renderCandidates()
@@ -485,7 +480,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 let dict = dictionary ?? EnglishDictionary(); dictionary = dict
                 let words = mode == .chineseNineKey ? dict.nine(input) : dict.suggestions(input)
                 DispatchQueue.main.async { [weak self] in
-                    guard let self, active, candidateRevision == request else { return }
+                    guard let self, active, candidateCoordinator.isCurrent(request: request, session: session) else { return }
                     englishChoices = (shortcuts[input].map { [$0] } ?? []) + words
                     renderCandidates()
                 }
@@ -499,7 +494,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 self.englishWord += self.session.uppercase ? value.uppercased() : value
                 if self.session.uppercase && !self.capsLock { self.session.toggleShift(); self.renderKeys() }
                 self.syncMarked()
-                let expected = self.englishWord; self.candidateRevision += 1; let request = self.candidateRevision
+                let expected = self.englishWord; self.candidateCoordinator.invalidate(); let request = self.candidateRevision
                 self.extrasQueue.async { [weak self] in
                     guard let self else { return }
                     let dict = self.dictionary ?? EnglishDictionary(); self.dictionary = dict
@@ -529,12 +524,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
     private func choose(_ index: Int, suffix: String = "") {
         guard session.candidates.indices.contains(index) else { return }
-        let candidate = session.candidates[index], request = candidateRevision, editRevision = session.revision
+        let candidate = session.candidates[index], request = candidateCoordinator.snapshot(session: session)
         deferred = {}
         pinyin.select(candidate, learn: prefs.bool(forKey: "learning") && wordInput && editField == nil) { [weak self] ok in
-            guard let self, active, request == candidateRevision else { return }
+            guard let self, active, candidateCoordinator.isCurrent(request: request, session: session) else { return }
             deferred = nil
-            if ok && KeyboardPolicy.shared.canChoose(session: session, candidate: candidate, revision: editRevision, index: Int32(index)) {
+            if ok && candidateCoordinator.canChoose(request: request, session: session, candidate: candidate, index: Int32(index)) {
                 commit(output(session.choose(index: Int32(index))) + suffix); expandedCandidates = false
             }
             requestCandidates(); drainEdits()
@@ -547,9 +542,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if candidateLoading && !session.composition.isEmpty {
             deferred = { [weak self] in self?.spaceNow(); self?.drainEdits() }; return
         }
-        if !session.composition.isEmpty {
-            if session.candidates.isEmpty { commit(session.takeRaw()); requestCandidates() }
-            else { choose(0) }
+        let boundary = candidateCoordinator.boundary(session: session, boundary: .space)
+        if boundary != .direct {
+            if boundary == .selectFirst { choose(0) }
+            else { preedit.text = session.composition + " · 请先选词、修改或点原样" }
             return
         }
         if !englishWord.isEmpty {
@@ -570,8 +566,9 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if candidateLoading && !session.composition.isEmpty {
             deferred = { [weak self] in self?.literalNow(text); self?.drainEdits() }; return
         }
-        if session.composition.isEmpty { commit(text) }
-        else if let first = session.candidates.first, first.consumed == session.composition.count, first.correction.isEmpty { choose(0, suffix: text) }
+        let boundary = candidateCoordinator.boundary(session: session, boundary: .literal)
+        if boundary == .direct { commit(text) }
+        else if boundary == .selectFirst { choose(0, suffix: text) }
         autoCapitalization(); renderCandidates()
     }
     private func backspace() {
@@ -580,7 +577,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 self.englishWord.removeLast(); self.englishChoices = []; self.syncMarked(); self.renderCandidates(); return
             }
             if !self.handwritingWord.isEmpty { self.discardHandwriting(); return }
-            if self.board?.hasStrokes == true, self.tool == "手写" { self.board?.undo(); return }
+            if self.handwriting.hasStrokes, self.tool == "手写" { self.handwriting.undo(); return }
             if let field = self.editField { if !self.draft[field].isEmpty { self.draft[field].removeLast() }; self.renderForm(); return }
             if self.session.backspace() { self.requestCandidates() }
             else { self.textDocumentProxy.deleteBackward(); self.lastHostContext = self.textDocumentProxy.documentContextBeforeInput; self.refreshTranslation() }
@@ -628,7 +625,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
     private func finishEnglish(_ value: String? = nil) {
         guard !englishWord.isEmpty else { return }
-        let text = value ?? englishWord; englishWord = ""; englishChoices = []; candidateRevision += 1; commit(text)
+        let text = value ?? englishWord; englishWord = ""; englishChoices = []; candidateCoordinator.invalidate(); commit(text)
     }
     private func autoCapitalization() {
         guard session.mode == .english, !capsLock, prefs.bool(forKey: "autoCap"), wordInput else { return }
@@ -648,14 +645,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                     if label == "关闭" { self?.closePanel() }
                 })
             }
-            switch name {
-            case "设置": self.settingsPanel()
-            case "剪贴板": self.clipboardPanel()
-            case "编辑": self.editPanel()
-            case "符号", "表情": self.symbolPanel(emoji: name == "表情")
-            case "手写": break
-            default: break
-            }
+            self.panels.render(name)
             self.renderKeys(); self.renderCandidates()
         } }
     }
@@ -669,85 +659,29 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         renderKeys(); requestCandidates()
     }
     private func notice(_ text: String) {
-        let label = UILabel(); label.text = text; label.numberOfLines = 0
-        label.font = .systemFont(ofSize: 13); label.textColor = palette.muted; panel.addArrangedSubview(label)
-    }
-    private func toggle(_ title: String, _ key: String) {
-        let line = UIStackView(); line.alignment = .center
-        let label = UILabel(); label.text = title; label.font = .systemFont(ofSize: 14); label.textColor = palette.ink
-        let control = UISwitch(); control.isOn = prefs.bool(forKey: key); control.accessibilityLabel = title
-        control.addAction(UIAction { [weak self, weak control] _ in
-            guard let control else { return }
-            self?.prefs.set(control.isOn, forKey: key)
-            if key == "autoCorrection" { self?.session.setAutoCorrection(enabled: control.isOn) }
-            if key == "gpuTranslation" {
-                self?.engine.unload(); self?.lastSource = ""
-            }
-            self?.renderKeys(); self?.renderCandidates(); self?.refreshTranslation()
-        }, for: .valueChanged)
-        line.addArrangedSubview(label); line.addArrangedSubview(control); panel.addArrangedSubview(line)
+        panels.notice(text)
     }
     private func settingButton(_ title: String, action: @escaping () -> Void) {
-        let b = button(title, action: action); b.heightAnchor.constraint(equalToConstant: 38).isActive = true; panel.addArrangedSubview(b)
+        panels.settingButton(title, action: action)
     }
-    private func settingsPanel() {
-        cycle("翻译模型", "translationModel", ["m2m100", "opus"], ["M2M100 · 中英互译", "OPUS-MT · 中文译英文"])
-        if prefs.string(forKey: "translationModel") == "opus" { toggle("Metal GPU 翻译（实验）", "gpuTranslation") }
-        for (title, key) in [("翻译栏","translation"),("拼音错键纠正","autoCorrection"),("学习选词和短语","learning"),
-                             ("后续字词联想","prediction"),("中文建议英文／数字原文","mixed"),("输入框内联拼音","inline"),
-                             ("繁体中文输出","traditional")] { toggle(title, key) }
-        let groups = ["an / ang","en / eng","in / ing","c / ch","s / sh","z / zh","l / n","f / h"]
-        for (i, title) in groups.enumerated() {
-            let line = UIStackView(); let label = UILabel(); label.text = "模糊音 \(title)"; label.font = .systemFont(ofSize: 14); label.textColor = palette.ink
-            let control = UISwitch(); control.isOn = prefs.integer(forKey: "fuzzyGroups") & (1 << i) != 0; control.accessibilityLabel = "模糊音 \(title)"
-            control.addAction(UIAction { [weak self, weak control] _ in
-                guard let self, let control else { return }; let old = prefs.integer(forKey: "fuzzyGroups")
-                prefs.set(control.isOn ? old | (1 << i) : old & ~(1 << i), forKey: "fuzzyGroups")
-            }, for: .valueChanged)
-            line.addArrangedSubview(label); line.addArrangedSubview(control); panel.addArrangedSubview(line)
-        }
-        settingButton("个人词典：添加、编辑、删除") { [weak self] in self?.dictionaryPanel() }
-        settingButton("短语缩写：添加、编辑、删除") { [weak self] in self?.shortcutsPanel() }
-        settingButton("清除个人词典和学习记录") { [weak self] in
-            guard let self else { return }
+    private func panelAction(_ action: IOSPanelAction) {
+        switch action {
+        case .settingChanged(let key):
+            if key == "autoCorrection" { session.setAutoCorrection(enabled: prefs.bool(forKey: key)) }
+            if key == "gpuTranslation" || key == "translationModel" { engine.unload(); translationPolicy.reset() }
+            renderKeys(); renderCandidates(); refreshTranslation()
+        case .open(let name): openTool(name)
+        case .close: closePanel()
+        case .dictionary: dictionaryPanel()
+        case .shortcuts: shortcutsPanel()
+        case .commit(let text): literal(text)
+        case .edit(let command): editCommand(command)
+        case .clearLearning:
             let alert = UIAlertController(title: "清除全部学习数据？", message: "个人词语和选词历史会被删除。", preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: "取消", style: .cancel))
             alert.addAction(UIAlertAction(title: "清除", style: .destructive) { _ in self.pinyin.clearLearning { ok in self.notice(ok ? "已清除学习数据" : "清除失败") } })
-            self.present(alert, animated: true)
+            present(alert, animated: true)
         }
-        for (title,key) in [("英文词候选与拼写纠正","englishSuggestions"),("英文空格自动更正","englishCorrection"),
-                            ("句首自动大写","autoCap"),("双击空格插入句号","doubleSpace"),("数字行","numberRow"),
-                            ("按键振动","vibration"),("按键声音","sound"),("按键弹出预览","preview"),("按键边框","keyBorder")] { toggle(title,key) }
-        cycle("单手模式", "oneHand", ["off","left","right"], ["关闭","靠左","靠右"])
-        cycle("主题", "theme", ["system","light","dark"], ["跟随系统","浅色","深色"])
-        slider("按键高度", "keyHeight", 40, 68)
-        slider("按键字号", "keyFont", 16, 28); slider("候选字号", "candidateFont", 16, 28)
-        cycle("手写速度", "handwritingSpeed", ["fast","normal","slow"], ["快","正常","慢"])
-        slider("手写笔画粗细", "handwritingThickness", 1, 6)
-        slider("长按延迟（毫秒）", "longPress", 250, 700)
-        settingButton("清除剪贴板历史") { [weak self] in self?.clips.clear(); self?.notice("已清除剪贴板历史") }
-        notice("设置保存在键盘扩展内。iOS 剪贴板需系统许可；键盘扩展不能访问麦克风，语音请使用系统听写。")
-    }
-    private func cycle(_ title: String, _ key: String, _ values: [String], _ labels: [String]) {
-        let index = values.firstIndex(of: prefs.string(forKey: key) ?? values[0]) ?? 0
-        settingButton("\(title)：\(labels[index])") { [weak self] in
-            guard let self else { return }; prefs.set(values[(index + 1) % values.count], forKey: key)
-            if key == "translationModel" {
-                engine.unload(); lastSource = ""; refreshTranslation()
-            }
-            openTool("设置")
-        }
-    }
-    private func slider(_ title: String, _ key: String, _ min: Float, _ max: Float) {
-        let label = UILabel(); label.font = .systemFont(ofSize: 14); label.textColor = palette.ink
-        label.text = "\(title)：\(prefs.integer(forKey: key))"; panel.addArrangedSubview(label)
-        let slider = UISlider(); slider.minimumValue = min; slider.maximumValue = max; slider.value = Float(prefs.integer(forKey: key))
-        slider.accessibilityLabel = title
-        slider.addAction(UIAction { [weak self, weak slider] _ in
-            guard let slider else { return }
-            self?.prefs.set(Int(slider.value.rounded()), forKey: key); label.text = "\(title)：\(Int(slider.value.rounded()))"
-        }, for: .valueChanged)
-        panel.addArrangedSubview(slider)
     }
     private func dictionaryPanel() {
         clear(panel); tool = "词典"
@@ -817,151 +751,53 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             }
         })
     }
-    private func clipboardPanel() {
-        notice("点系统粘贴按钮读取文字；未固定文字保留 1 小时。")
-        let paste = UIPasteControl(configuration: .init()); paste.target = self; panel.addArrangedSubview(paste)
-        for entry in clips.entries() {
-            settingButton((entry.pinned ? "📌 " : "") + entry.text) { [weak self] in self?.commit(entry.text) }
-            panel.addArrangedSubview(makeRow([entry.pinned ? "取消固定" : "固定", "删除"], height: 30) { [weak self] action in
-                guard let self else { return }; if action == "删除" { clips.delete(entry.text) } else { clips.pin(entry.text) }
-                openTool("剪贴板")
-            })
-        }
-        if clips.entries().isEmpty { notice("暂无剪贴板历史") }
-    }
-    private func editPanel() {
-        notice("复制和剪切请先在输入框选择文字。")
-        panel.addArrangedSubview(makeRow(["←","→","复制","剪切"], height: 42) { [weak self] action in
-            guard let self else { return }
-            switch action {
-            case "←": textDocumentProxy.adjustTextPosition(byCharacterOffset: -1)
-            case "→": textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
+    private func editCommand(_ command: String) {
+        queueEdit {
+            switch command {
+            case "←": self.textDocumentProxy.adjustTextPosition(byCharacterOffset: -1)
+            case "→": self.textDocumentProxy.adjustTextPosition(byCharacterOffset: 1)
+            case "复制", "剪切":
+                guard self.hasFullAccess, let text = self.textDocumentProxy.selectedText, !text.isEmpty else {
+                    self.notice("请先选择文字；复制需开启键盘完全访问。"); return
+                }
+                UIPasteboard.general.string = text; self.clips.add(text)
+                if command == "剪切" { self.textDocumentProxy.deleteBackward() }
+            case "撤销":
+                let before = self.textDocumentProxy.documentContextBeforeInput ?? ""
+                guard before == self.undoContext, !self.lastCommit.isEmpty, before.hasSuffix(self.lastCommit) else { return }
+                for _ in self.lastCommit { self.textDocumentProxy.deleteBackward() }
+                self.lastCommit = ""; self.undoContext = nil
             default:
-                guard hasFullAccess, let text = textDocumentProxy.selectedText, !text.isEmpty else { notice("请先选择文字；复制需开启键盘完全访问。"); return }
-                UIPasteboard.general.string = text; clips.add(text)
-                if action == "剪切" { textDocumentProxy.deleteBackward() }
+                let tail = KeyboardPolicy.shared.deleteWord(context: self.textDocumentProxy.documentContextBeforeInput ?? "")
+                for _ in tail { self.textDocumentProxy.deleteBackward() }
             }
-        })
-        let paste = UIPasteControl(configuration: .init()); paste.target = self; panel.addArrangedSubview(paste)
-        panel.addArrangedSubview(makeRow(["按词删除","撤销"], height: 42) { [weak self] action in
-            guard let self else { return }
-            let before = textDocumentProxy.documentContextBeforeInput ?? ""
-            if action == "撤销" {
-                guard before == undoContext, !lastCommit.isEmpty, before.hasSuffix(lastCommit) else { return }
-                for _ in lastCommit { textDocumentProxy.deleteBackward() }; lastCommit = ""; undoContext = nil
-            } else {
-                let tail = KeyboardPolicy.shared.deleteWord(context: before)
-                for _ in tail { textDocumentProxy.deleteBackward() }
-            }
-            refreshTranslation()
-        })
-    }
-    private func symbolPanel(emoji: Bool) {
-        let groups = KeyboardSymbols.shared.categories(emoji: emoji).map {
-            ($0, KeyboardSymbols.shared.values(emoji: emoji, category: $0, recent: "").joined(separator: " "))
+            self.refreshTranslation()
         }
-        let values = UIStackView(); values.axis = .vertical; values.spacing = 4
-        let key = emoji ? "recentEmoji" : "recentSymbols"
-        let render: (String) -> Void = { [weak self, weak values] text in
-            guard let self, let values else { return }
-            clear(values)
-            let symbols = text.split(separator: " ").map(String.init)
-            for i in stride(from: 0, to: symbols.count, by: 6) {
-                values.addArrangedSubview(makeRow(Array(symbols[i..<min(i+6,symbols.count)]), height: 42) { [weak self] symbol in
-                    guard let self else { return }; commit(symbol)
-                    let recent = prefs.stringArray(forKey: key) ?? []
-                    prefs.set(KeyboardSymbols.shared.remember(value: symbol, previous: recent.joined(separator: " ")).split(separator: " ").map(String.init), forKey: key)
-                })
-            }
-        }
-        let tabs = UIStackView(); tabs.distribution = .fillEqually
-        for (name,text) in groups { tabs.addArrangedSubview(button(name) { [weak self] in render(name == "最近" ? self?.prefs.stringArray(forKey: key)?.joined(separator: " ") ?? "" : text) }) }
-        panel.addArrangedSubview(tabs)
-        if emoji {
-            panel.addArrangedSubview(makeRow(KeyboardSymbols.shared.keywords(), height: 30) { term in
-                render(KeyboardSymbols.shared.keywordValues(keyword: term).joined(separator: " "))
-            })
-        }
-        panel.addArrangedSubview(values); render(groups[1].1)
     }
     private func finishHandwriting() {
-        let word = handwritingCandidate.isEmpty ? handwritingWord : handwritingCandidate
-        handwritingWord = ""; handwritingCandidate = ""
-        handwritingPending?.cancel(); handwritingRevision += 1
-        if !word.isEmpty { commit(word) }
-        board?.clear()
-        if let handwritingChoices { clear(handwritingChoices) }
+        handwriting.finish()
     }
     private func discardHandwriting() {
-        cancelMarked(); handwritingWord = ""; handwritingCandidate = ""
-        handwritingPending?.cancel(); handwritingRevision += 1; board?.clear()
-        if let handwritingChoices { clear(handwritingChoices) }
+        cancelMarked(); clearHandwriting()
+    }
+    private func clearHandwriting() {
+        handwriting.clear()
     }
     private func resolveHandwriting(_ action: @escaping () -> Void) {
-        guard tool == "手写", handwritingCandidate.isEmpty, handwritingWord.isEmpty,
-              let board, board.hasStrokes else {
+        guard tool == "手写" else {
             finishHandwriting(); action(); return
         }
-        // Capture the current strokes. The engine queue waits for any running
-        // recognition; later edits stay behind this boundary until it resolves.
-        let request = handwritingRevision, points = board.points()
-        deferred = {}; board.isUserInteractionEnabled = false
-        handwritingEngine.recognize(points) { [weak self, weak board] words in
-            board?.isUserInteractionEnabled = true
+        deferred = {}
+        handwriting.resolve { [weak self] resolved in
             guard let self, active else { return }
             deferred = nil
-            if request == handwritingRevision, tool == "手写", let first = words.first {
-                handwritingCandidate = output(first); finishHandwriting(); action()
-            }
+            if resolved { action() }
             drainEdits()
         }
     }
     private func renderHandwriting() {
-        keys.isHidden = false; handwritingRevision += 1; handwritingPending?.cancel()
-        let strip = UIStackView(); strip.spacing = 4
-        handwritingChoices = strip
-        let scroll = UIScrollView(); scroll.addSubview(strip); strip.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            strip.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor), strip.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
-            strip.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor), strip.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
-            strip.heightAnchor.constraint(equalTo: scroll.frameLayoutGuide.heightAnchor), scroll.heightAnchor.constraint(equalToConstant: 42)
-        ])
-        keys.addArrangedSubview(scroll)
-        let board = HandwritingView(); self.board = board; board.backgroundColor = .clear; board.isOpaque = false; board.ink = palette.ink
-        board.layer.cornerRadius = 12; board.lineWidth = CGFloat(prefs.integer(forKey: "handwritingThickness")); board.accessibilityLabel = "中文手写画板"
-        board.heightAnchor.constraint(equalToConstant: compact ? 120 : keyHeight * 4).isActive = true; keys.addArrangedSubview(board)
-        board.began = { [weak self] in
-            guard let self else { return }; handwritingPending?.cancel(); handwritingRevision += 1
-            if !handwritingWord.isEmpty { finishHandwriting() }
-            handwritingCandidate = ""; clear(strip)
-        }
-        board.changed = { [weak self, weak board, weak strip] points in
-            guard let self, let board, let strip else { return }; handwritingPending?.cancel(); handwritingRevision += 1
-            let request = handwritingRevision; handwritingCandidate = ""; clear(strip)
-            guard !points.isEmpty else { return }
-            handwritingEngine.recognize(points) { [weak self] words in
-                guard let self, active, tool == "手写", request == handwritingRevision else { return }
-                handwritingCandidate = words.first.map(output) ?? ""
-                for word in words {
-                    let b = button(output(word)) { [weak self] in
-                        guard let self, request == handwritingRevision else { return }
-                        queueEdit {
-                            guard request == self.handwritingRevision else { return }
-                            self.handwritingCandidate = self.output(word); self.finishHandwriting()
-                        }
-                    }
-                    b.widthAnchor.constraint(equalToConstant: 52).isActive = true; strip.addArrangedSubview(b)
-                }
-                guard !words.isEmpty else { return }
-                let work = DispatchWorkItem { [weak self] in
-                    guard let self, active, request == handwritingRevision, tool == "手写" else { return }
-                    handwritingWord = handwritingCandidate; syncMarked(); board.clear()
-                }
-                handwritingPending = work
-                let delay = Double(KeyboardPolicy.shared.handwritingDelay(speed: prefs.string(forKey: "handwritingSpeed") ?? "normal")) / 1000
-                DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
-            }
-        }
+        keys.isHidden = false
+        handwriting.render(in: keys, ink: palette.ink, height: compact ? 120 : keyHeight * 4)
         keys.addArrangedSubview(makeRow(["键盘","撤销","清空","空格","⌫",enterTitle], height: 44) { [weak self] name in
             guard let self else { return }
             switch name {
@@ -969,7 +805,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             case "清空": discardHandwriting()
             case "撤销", "⌫":
                 if !handwritingWord.isEmpty { discardHandwriting() }
-                else if board.hasStrokes { board.undo() } else if name == "⌫" { textDocumentProxy.deleteBackward() }
+                else if handwriting.hasStrokes { handwriting.undo() } else if name == "⌫" { textDocumentProxy.deleteBackward() }
             case "空格": space()
             default: literal("\n")
             }
@@ -991,12 +827,11 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         if active {
             let context = textDocumentProxy.documentContextBeforeInput
             if !committing && context != lastHostContext && (!session.composition.isEmpty || !englishWord.isEmpty ||
-                !handwritingWord.isEmpty || !handwritingCandidate.isEmpty || (tool == "手写" && board?.hasStrokes == true)) {
+                !handwritingWord.isEmpty || !handwritingCandidate.isEmpty || (tool == "手写" && handwriting.hasStrokes)) {
                 editActions.removeAll()
                 if !englishWord.isEmpty || !handwritingWord.isEmpty { textDocumentProxy.unmarkText(); marked = "" }
                 else { cancelMarked() }
-                englishWord = ""; englishChoices = []; handwritingWord = ""; handwritingCandidate = ""
-                handwritingRevision += 1; handwritingPending?.cancel(); board?.clear()
+                englishWord = ""; englishChoices = []; clearHandwriting()
                 session.clearComposition(); invalidateCandidates(); renderCandidates()
             }
             lastHostContext = context; refreshTranslation()
@@ -1009,28 +844,32 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     override func viewDidDisappear(_ animated: Bool) {
         deleteTimer?.invalidate(); deleteTimer = nil; keyPreview?.removeFromSuperview()
         finishEnglish(); finishHandwriting(); cancelMarked()
-        active = false; revision += 1; pending?.cancel(); engine.unload(); pinyin.close()
+        active = false; translationPolicy.reset(); pending?.cancel(); engine.unload(); pinyin.close()
         tool = nil; editField = nil; form.isHidden = true; panelScroll.isHidden = true
-        handwritingRevision += 1; handwritingPending?.cancel(); handwritingEngine.close(); board = nil
+        handwriting.close()
         editActions.removeAll()
-        session.clearComposition(); invalidateCandidates(); lastSource = ""
+        session.clearComposition(); invalidateCandidates()
         super.viewDidDisappear(animated)
     }
     private func refreshTranslation() {
         guard active else { return }
         var context = textDocumentProxy.documentContextBeforeInput ?? ""
         context = KeyboardPolicy.shared.committedContext(context: context, marked: marked)
-        guard prefs.bool(forKey: "translation"), wordInput, editField == nil else {
-            revision += 1; pending?.cancel(); engine.cancel(); lastSource = ""; source.text = ""; english.text = ""
+        let enabled = prefs.bool(forKey: "translation") && wordInput && editField == nil
+        let model = prefs.string(forKey: "translationModel") ?? "m2m100"
+        let direction = TranslationModels.shared.direction(context: context, model: model)
+        guard let request = translationPolicy.update(context: context, enabled: enabled, direction: direction,
+            model: model, allowModelSwitch: false) else { return }
+        pending?.cancel(); engine.cancel()
+        guard enabled else {
+            source.text = ""; english.text = ""
             translationCard.isHidden = true; return
         }
-        let sentence = TranslationText.shared.sentence(context: context)
-        let bilingual = prefs.string(forKey: "translationModel") != "opus"
-        let reverse = bilingual
-            && TranslationText.shared.accepts(source: sentence, direction: .englishToChinese)
+        let sentence = request.source
+        let bilingual = TranslationModels.shared.supports(model: model, direction: .englishToChinese)
+        let reverse = direction == .englishToChinese
         layout.direction.text = reverse ? "EN → 中" : "中 → EN"
-        guard reverse || TranslationText.shared.accepts(source: sentence, direction: .chineseToEnglish) else {
-            revision += 1; pending?.cancel(); engine.cancel(); lastSource = ""
+        guard !sentence.isEmpty else {
             source.isHidden = true
             english.text = bilingual ? "输入中文或英文，查看对照翻译" : "输入中文，看看英文怎么说"
             layout.direction.text = bilingual ? "中 ⇄ EN" : "中 → EN"
@@ -1038,18 +877,14 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             resize()
             return
         }
-        guard sentence != lastSource else { return }
-        lastSource = sentence; revision += 1
-        let request = revision
-        pending?.cancel(); engine.cancel(); source.text = sentence; source.isHidden = compact; english.text = "正在翻译…"
+        source.text = sentence; source.isHidden = compact; english.text = "正在翻译…"
         resize()
-        guard !sentence.isEmpty else { status.text = "输入中文，停顿后显示英文"; return }
         status.text = "等待停顿…"
         let work = DispatchWorkItem { [weak self] in
-            guard let self, active, revision == request else { return }
+            guard let self, active, translationPolicy.isCurrent(request: request) else { return }
             status.text = "正在本地翻译…"
             engine.translate(source: sentence) { [weak self] result in
-                guard let self, active, revision == request else { return }
+                guard let self, active, translationPolicy.isCurrent(request: request) else { return }
                 switch result {
                 case .success(let output): english.text = output; status.text = engine.backendLabel
                 case .failure(let error): english.text = error.localizedDescription; status.text = "翻译未完成"
@@ -1057,6 +892,7 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
                 resize()
             }
         }
-        pending = work; DispatchQueue.main.asyncAfter(deadline: .now() + 0.7, execute: work)
+        pending = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(request.delayMillis) / 1000, execute: work)
     }
 }

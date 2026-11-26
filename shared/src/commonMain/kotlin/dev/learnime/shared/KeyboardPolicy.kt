@@ -13,8 +13,6 @@ object KeyboardPolicy {
     fun validShortcut(key: String, phrase: String): Boolean = phrase.isNotBlank() && phrase.length <= 1000 &&
         key.matches(Regex("(?:[a-z]{1,20}|[2-9]{1,20})"))
     fun handwritingDelay(speed: String): Long = when (speed) { "fast" -> 600L; "slow" -> 1600L; else -> 1000L }
-    fun canChoose(session: KeyboardSession, candidate: PinyinCandidate, revision: Long, index: Int): Boolean =
-        session.revision == revision && session.candidates.getOrNull(index) == candidate
     fun deleteWord(context: String): String =
         Regex("(?:\\s+|[\\p{L}\\p{N}]+\\s*|[^\\p{L}\\p{N}\\s])$").find(context)?.value.orEmpty()
 }

@@ -50,40 +50,34 @@ class TranslationController(
     private val onState: (TranslationState) -> Unit,
 ) {
     private var job: Job? = null
-    private var revision = 0L
-    private var lastSource = ""
-    private var lastDirection = TranslationDirection.CHINESE_TO_ENGLISH
+    private val policy = TranslationPolicy()
 
     fun update(context: String, enabled: Boolean = true,
-        direction: TranslationDirection = TranslationDirection.CHINESE_TO_ENGLISH) {
-        val source = if (enabled) TranslationText.sentence(context).takeIf {
-            TranslationText.accepts(it, direction)
-        }.orEmpty() else ""
-        if (source == lastSource && direction == lastDirection) return
-        lastSource = source
-        lastDirection = direction
-        val request = ++revision
+        direction: TranslationDirection = TranslationDirection.CHINESE_TO_ENGLISH,
+        model: String = "m2m100") {
+        val request = policy.update(context, enabled, direction, model, allowModelSwitch = true) ?: return
+        val source = request.source
         job?.cancel()
         engine.cancel()
         if (source.isBlank()) { onState(TranslationState()); return }
         onState(TranslationState(source = source, status = "等待停顿…"))
         job = scope.launch {
-            delay(if (source.last() in "。！？!?.") 150L else 700L)
+            delay(request.delayMillis)
             onState(TranslationState(source = source, status = "正在本地翻译…", busy = true))
             try {
                 val english = engine.translate(source, direction).trim()
                 ensureActive()
-                if (request == revision) onState(TranslationState(source, english,
+                if (policy.isCurrent(request)) onState(TranslationState(source, english,
                     if (english.isBlank()) "模型没有返回译文" else "本地翻译 · 仅供学习"))
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) {
-                if (request == revision) onState(TranslationState(source = source, status = e.message ?: "翻译失败"))
+                if (policy.isCurrent(request)) onState(TranslationState(source = source, status = e.message ?: "翻译失败"))
             }
         }
     }
 
     fun reset() {
-        revision++; job?.cancel(); engine.cancel(); lastSource = ""
+        policy.reset(); job?.cancel(); engine.cancel()
         onState(TranslationState())
     }
 }

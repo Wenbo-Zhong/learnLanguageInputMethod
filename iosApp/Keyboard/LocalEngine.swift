@@ -38,7 +38,7 @@ final class LocalEngine {
                 guard isCurrent(request) else { return }
                 let selected = model ?? KeyboardPreferences.store.string(forKey: "translationModel") ?? "m2m100"
                 if selected == "m2m100" {
-                    let reverse = TranslationText.shared.accepts(source: source, direction: .englishToChinese)
+                    let reverse = TranslationModels.shared.direction(context: source, model: selected) == .englishToChinese
                     let result = try m2m.translate(source, reverse: reverse, request: modelRequest)
                     guard isCurrent(request) else { return }
                     backendLabel = "M2M100 · \(reverse ? "EN → 中" : "中 → EN") · CPU"

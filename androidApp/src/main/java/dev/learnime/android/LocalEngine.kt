@@ -3,6 +3,7 @@ package dev.learnime.android
 import android.content.Context
 import dev.learnime.shared.TranslationEngine
 import dev.learnime.shared.TranslationDirection
+import dev.learnime.shared.TranslationModels
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -20,8 +21,8 @@ internal class LocalEngine(context: Context) : TranslationEngine {
 
     override suspend fun translate(source: String, direction: TranslationDirection): String = mutex.withLock {
         // OPUS asset is zho-eng only; reverse translation uses the explicitly capable multilingual model.
-        val selected = if (direction == TranslationDirection.ENGLISH_TO_CHINESE) TranslationModel.M2M100
-            else TranslationModel.selected(app)
+        val selected = if (TranslationModels.required(TranslationModel.selected(app).name, direction, true) == "opus")
+            TranslationModel.OPUS_TINY else TranslationModel.M2M100
         if (selected != active) {
             when (active) {
                 TranslationModel.OPUS_TINY -> opus.close()

@@ -6,6 +6,7 @@ import android.view.Gravity
 import android.widget.*
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import kotlinx.coroutines.*
+import dev.learnime.shared.*
 
 class KeyboardSettingsActivity : Activity() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
@@ -18,11 +19,11 @@ class KeyboardSettingsActivity : Activity() {
         content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(ui.dp(20), ui.dp(32), ui.dp(20), ui.dp(32)) }
         setContentView(ScrollView(this).apply { addView(content); setBackgroundColor(ui.surface) })
         title("键盘设置")
-        choice("中文布局", "chineseMode", listOf("九键" to "CHINESE_NINE_KEY", "26键" to "CHINESE_QWERTY"), "CHINESE_QWERTY")
-        toggle("翻译栏", "translation", true)
+        choice("chineseMode")
+        toggle("translation")
         title("中文更正和建议")
-        toggle("拼音错键纠正", "autoCorrection", true)
-        val groups = listOf("an / ang", "en / eng", "in / ing", "c / ch", "s / sh", "z / zh", "l / n", "f / h")
+        toggle("autoCorrection")
+        val groups = KeyboardSettings.fuzzyGroups
         groups.forEachIndexed { index, label ->
             content.addView(Switch(this).apply {
                 text = "模糊音 $label"; isChecked = prefs.getInt("fuzzyGroups", 0) and (1 shl index) != 0
@@ -32,11 +33,7 @@ class KeyboardSettingsActivity : Activity() {
                 }
             }, LinearLayout.LayoutParams(-1, ui.dp(48)))
         }
-        toggle("学习选词和短语", "learning", true)
-        toggle("后续字词联想", "prediction", true)
-        toggle("中文候选建议英文／数字原文", "mixed", true)
-        toggle("在输入框显示组合文字", "inline", false)
-        toggle("繁体中文输出", "traditional", false)
+        listOf("learning", "prediction", "mixed", "inline", "traditional").forEach { toggle(it) }
         button("个人词典：添加、编辑、删除") { dictionary() }
         button("短语缩写：添加、编辑、删除") { shortcuts() }
         button("清除个人词典和学习记录") {
@@ -48,25 +45,15 @@ class KeyboardSettingsActivity : Activity() {
                 } }.show()
         }
         title("英文和标点")
-        toggle("英文词候选与拼写纠正", "englishSuggestions", true)
-        toggle("英文空格自动更正", "englishCorrection", false)
-        toggle("句首自动大写", "autoCap", true)
-        toggle("双击空格插入句号", "doubleSpace", false)
+        listOf("englishSuggestions", "englishCorrection", "autoCap", "doubleSpace").forEach { toggle(it) }
         title("布局和反馈")
-        choice("单手模式", "oneHand", listOf("关闭" to "off", "靠左" to "left", "靠右" to "right"), "off")
-        number("按键高度", "keyHeight", 54, 40, 68)
-        number("按键字号", "keyFont", 22, 16, 28)
-        number("候选字号", "candidateFont", 20, 16, 28)
-        toggle("数字行", "numberRow", false)
-        toggle("按键声音", "sound", false)
-        toggle("按键振动", "vibration", false)
-        number("振动时长（毫秒）", "vibrationMs", 15, 5, 40)
-        number("长按延迟（毫秒）", "longPress", 400, 250, 700)
-        toggle("按键弹出预览", "preview", false)
-        toggle("按键边框", "keyBorder", false)
-        choice("主题", "theme", listOf("跟随系统" to "system", "浅色" to "light", "深色" to "dark"), "system")
+        choice("oneHand")
+        listOf("keyHeight", "keyFont", "candidateFont").forEach { number(it) }
+        listOf("numberRow", "sound", "vibration").forEach { toggle(it) }
+        number("vibrationMs"); number("longPress")
+        toggle("preview"); toggle("keyBorder"); choice("theme")
         title("工具和隐私")
-        toggle("保存剪贴板文字历史", "clipboardHistory", true)
+        toggle("clipboardHistory")
         button("清除剪贴板历史") { ClipboardHistory(this).clear(); toast("已清除") }
         button("离线语音权限") {
             if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) != android.content.pm.PackageManager.PERMISSION_GRANTED)
@@ -74,8 +61,8 @@ class KeyboardSettingsActivity : Activity() {
             else toast("麦克风权限已开启")
         }
         title("手写")
-        choice("手写速度", "handwritingSpeed", listOf("快" to "fast", "正常" to "normal", "慢" to "slow"), "normal")
-        number("手写笔画粗细", "handwritingThickness", 3, 1, 6)
+        choice("handwritingSpeed")
+        number("handwritingThickness")
         button("开源组件和数据许可") {
             MaterialAlertDialogBuilder(this).setTitle("开源许可").setMessage(
                 assets.open("extras/NOTICE.txt").bufferedReader().use { it.readText() }
@@ -116,16 +103,21 @@ class KeyboardSettingsActivity : Activity() {
             }.setNegativeButton("关闭", null).show()
     }
     private fun title(value: String) { content.addView(ui.text(value, 22f, ui.primary, true).apply { setPadding(0, ui.dp(20), 0, ui.dp(12)) }) }
-    private fun toggle(label: String, key: String, default: Boolean) {
+    private fun toggle(key: String) {
+        val setting = KeyboardSettings.get(key, KeyboardPlatform.ANDROID)
         content.addView(Switch(this).apply {
-            text = label; isChecked = prefs.getBoolean(key, default)
+            text = setting.title; isChecked = prefs.getBoolean(key, setting.booleanDefault)
             setOnCheckedChangeListener { _, checked -> prefs.edit().putBoolean(key, checked).apply() }
         }, LinearLayout.LayoutParams(-1, ui.dp(52)))
     }
     private fun button(label: String, action: () -> Unit) {
         content.addView(ui.button(label, ui.low, ui.onSurface, action = action), LinearLayout.LayoutParams(-1, ui.dp(48)).apply { bottomMargin = ui.dp(8) })
     }
-    private fun choice(label: String, key: String, choices: List<Pair<String, String>>, default: String) {
+    private fun choice(key: String) {
+        val setting = KeyboardSettings.get(key, KeyboardPlatform.ANDROID)
+        val label = setting.title
+        val choices = setting.options.map { it.label to it.value }
+        val default = setting.choiceDefault
         button("$label：${choices.firstOrNull { it.second == prefs.getString(key, default) }?.first}") {
             MaterialAlertDialogBuilder(this).setTitle(label).setSingleChoiceItems(choices.map { it.first }.toTypedArray(),
                 choices.indexOfFirst { it.second == prefs.getString(key, default) }) { dialog, index ->
@@ -133,14 +125,20 @@ class KeyboardSettingsActivity : Activity() {
             }.show()
         }
     }
-    private fun number(label: String, key: String, default: Int, min: Int, max: Int) {
-        val text = ui.text("$label：${prefs.getInt(key, default)}", 16f)
+    private fun number(key: String) {
+        val setting = KeyboardSettings.get(key, KeyboardPlatform.ANDROID)
+        val label = setting.title
+        val value = setting.validateNumber(prefs.getInt(key, setting.numberDefault))
+        val text = ui.text("$label：$value", 16f)
         content.addView(text)
         content.addView(SeekBar(this).apply {
-            this.min = min; this.max = max; progress = prefs.getInt(key, default)
+            min = setting.minimum; max = setting.maximum; progress = value
             setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
                 override fun onProgressChanged(bar: SeekBar, value: Int, fromUser: Boolean) {
-                    if (fromUser) { prefs.edit().putInt(key, value).apply(); text.text = "$label：$value" }
+                    if (fromUser) {
+                        val checked = setting.validateNumber(value)
+                        prefs.edit().putInt(key, checked).apply(); text.text = "$label：$checked"
+                    }
                 }
                 override fun onStartTrackingTouch(bar: SeekBar) {}
                 override fun onStopTrackingTouch(bar: SeekBar) {}

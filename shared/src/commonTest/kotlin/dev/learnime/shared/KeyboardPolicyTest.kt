@@ -47,15 +47,4 @@ class KeyboardPolicyTest {
         assertEquals("新输入框", KeyboardPolicy.committedContext("新输入框", "ni"))
     }
 
-    @Test fun candidateCannotBeChosenAfterAnEditOrReplacement() {
-        val session = KeyboardSession()
-        session.key("n"); session.key("i")
-        val candidate = PinyinCandidate("你", "ni", 2)
-        session.applyCandidates("ni", KeyboardMode.CHINESE_QWERTY, listOf(candidate))
-        val revision = session.revision
-        assertTrue(KeyboardPolicy.canChoose(session, candidate, revision, 0))
-        assertFalse(KeyboardPolicy.canChoose(session, candidate.copy(text = "拟"), revision, 0))
-        session.key("h")
-        assertFalse(KeyboardPolicy.canChoose(session, candidate, revision, 0))
-    }
 }

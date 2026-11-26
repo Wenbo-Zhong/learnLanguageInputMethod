@@ -7,12 +7,15 @@ enum KeyboardPreferences {
         if let previous = store.object(forKey: "pinyinCorrection") as? Bool, store.object(forKey: "autoCorrection") == nil {
             store.set(previous, forKey: "autoCorrection")
         }
-        store.register(defaults: [
-            "translation": true, "translationModel": "m2m100", "learning": true, "prediction": true, "mixed": true,
-            "autoCorrection": true, "englishSuggestions": true, "autoCap": true,
-            "keyHeight": 44, "keyFont": 22, "candidateFont": 20, "theme": "system",
-            "oneHand": "off", "handwritingSpeed": "normal", "handwritingThickness": 3, "longPress": 400
-        ])
+        var defaults: [String: Any] = [:]
+        for setting in KeyboardSettings.shared.all(platform: .ios) {
+            switch setting.type {
+            case .boolean: defaults[setting.key] = setting.booleanDefault
+            case .number: defaults[setting.key] = Int(setting.numberDefault)
+            default: defaults[setting.key] = setting.choiceDefault
+            }
+        }
+        store.register(defaults: defaults)
     }
 }
 
