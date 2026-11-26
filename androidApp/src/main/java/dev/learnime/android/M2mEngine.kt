@@ -218,7 +218,7 @@ internal class M2mEngine(context: Context) : TranslationEngine {
                 }
                 check(input.read() == -1) { "M2M100 映射文件不完整" }
             }
-            loadedTokenizer = NativeSentencePiece.create(files.spm.absolutePath)
+            loadedTokenizer = NativeSentencePiece.create(files.spm.absolutePath.toByteArray(Charsets.UTF_8))
             check(loadedTokenizer != 0L) { "M2M100 SentencePiece 加载失败" }
             check(files.decoderRuntime == environment.version) { "内置优化解码器与推理库版本不匹配，请重新生成模型" }
             OrtSession.SessionOptions().use { options ->

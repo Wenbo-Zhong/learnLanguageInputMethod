@@ -14,9 +14,8 @@ import java.util.concurrent.atomic.AtomicLong
 
 internal object NativeSentencePiece {
     init { System.loadLibrary("learnime") }
-    external fun create(path: String): Long
-    external fun encode(handle: Long, text: String): IntArray
-    external fun decode(handle: Long, ids: IntArray): String
+    external fun create(path: ByteArray): Long
+    external fun decodeUtf8(handle: Long, ids: IntArray): ByteArray?
     external fun destroy(handle: Long)
     external fun encodeUtf8(handle: Long, text: ByteArray): IntArray
     external fun decodePieces(handle: Long, pieces: Array<ByteArray>): ByteArray?
@@ -36,7 +35,8 @@ internal class OpusEngine(context: Context) : TranslationEngine {
         mutex.withLock {
             val request = cancelRevision.get()
             ensureLoaded()
-            val encoded = NativeSentencePiece.encode(tokenizer, source).take(MAX_TOKENS - 1).toMutableList().apply { add(EOS) }
+            val encoded = NativeSentencePiece.encodeUtf8(tokenizer, source.toByteArray(Charsets.UTF_8))
+                .take(MAX_TOKENS - 1).toMutableList().apply { add(EOS) }
             require(encoded.isNotEmpty()) { "请输入中文句子" }
             val ids = IntArray(MAX_TOKENS) { PAD }.also { out -> encoded.forEachIndexed { i, id -> out[i] = id } }
             // This model's pad_mask is added to attention logits, not a 0/1 keep mask.
@@ -70,7 +70,8 @@ internal class OpusEngine(context: Context) : TranslationEngine {
                 next = argmax(stepLogits[0][0])
             }
             checkCurrent(request)
-            NativeSentencePiece.decode(tokenizer, output.toIntArray()).trim()
+            checkNotNull(NativeSentencePiece.decodeUtf8(tokenizer, output.toIntArray())) { "SentencePiece 解码失败" }
+                .toString(Charsets.UTF_8).trim()
         }
     }
 
@@ -84,7 +85,7 @@ internal class OpusEngine(context: Context) : TranslationEngine {
         val files = ModelStore.prepare(app)
         val model = FileInputStream(files.model).channel.use { it.map(FileChannel.MapMode.READ_ONLY, 0, files.model.length()) }
         interpreter = Interpreter(model, Interpreter.Options().apply { setNumThreads(4) })
-        tokenizer = NativeSentencePiece.create(files.sourceSpm.absolutePath)
+        tokenizer = NativeSentencePiece.create(files.sourceSpm.absolutePath.toByteArray(Charsets.UTF_8))
         check(tokenizer != 0L) { "SentencePiece 词表加载失败" }
     }
 

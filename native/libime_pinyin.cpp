@@ -205,7 +205,8 @@ struct li_pinyin {
     Lattice lattice;
     Prediction prediction;
     Query query;
-    std::string userPath, output;
+    std::string userPath, output, learningError;
+    bool learningPending = false;
     unsigned long long generation = 0;
     int fuzzyGroups = -1;
     std::vector<Candidate> saved;
@@ -214,6 +215,7 @@ struct li_pinyin {
     }
     void save() {
         if (userPath.empty()) return;
+        learningPending = true;
         auto tmp = userPath + ".tmp";
         {
             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
@@ -230,6 +232,8 @@ struct li_pinyin {
             if (!out) throw std::runtime_error("Cannot flush user data");
         }
         std::filesystem::rename(tmp, userPath);
+        learningPending = false;
+        learningError.clear();
     }
     bool candidate(const SentenceResult &sentence, Candidate &c) {
         c.sentence = sentence; c.text = sentence.toString();
@@ -446,23 +450,37 @@ extern "C" const char *li_pinyin_select(li_pinyin *e, unsigned long long token, 
         if (c.path != path || !e->candidate(c.sentence, validated) ||
             validated.text != c.text || validated.consumed != c.consumed) return "";
         if (learn) {
-            std::vector<HistoryBigram::WordWithCode> words;
-            std::string code;
-            for (auto *node : c.sentence.sentence()) {
-                auto encoded = node->as<PinyinLatticeNode>().encodedPinyin();
-                if (!encoded.empty()) { words.emplace_back(node->word(), encoded); code += encoded; }
+            try {
+                // Keep in-memory learning on failure; the next successful save
+                // persists it together with subsequent updates.
+                e->learningPending = !e->userPath.empty();
+                std::vector<HistoryBigram::WordWithCode> words;
+                std::string code;
+                for (auto *node : c.sentence.sentence()) {
+                    auto encoded = node->as<PinyinLatticeNode>().encodedPinyin();
+                    if (!encoded.empty()) { words.emplace_back(node->word(), encoded); code += encoded; }
+                }
+                if (words.size() > 1 && code.size() <= 8) {
+                    auto spelling = PinyinEncoder::decodeFullPinyin(code);
+                    e->ime->dict()->addWord(PinyinDictionary::UserDict, spelling, c.text);
+                    words = {{c.text, code}};
+                }
+                e->ime->model()->history().addWithCode(words);
+                e->save();
+            } catch (const std::exception &error) {
+                e->learningError = error.what();
+            } catch (...) {
+                e->learningError = "Unknown learning error";
             }
-            if (words.size() > 1 && code.size() <= 8) {
-                auto spelling = PinyinEncoder::decodeFullPinyin(code);
-                e->ime->dict()->addWord(PinyinDictionary::UserDict, spelling, c.text);
-                words = {{c.text, code}};
-            }
-            e->ime->model()->history().addWithCode(words);
-            e->save();
         }
         e->clear(); e->output = c.text;
         return e->output.c_str();
     } catch (...) { e->clear(); return ""; }
+}
+extern "C" const char *li_pinyin_learning_error(li_pinyin *e) {
+    if (!e) return "";
+    std::lock_guard guard(engineMutex);
+    return e->learningPending ? e->learningError.c_str() : "";
 }
 extern "C" const char *li_pinyin_predict(li_pinyin *e, const char *history) {
     if (!e || !history) return "";

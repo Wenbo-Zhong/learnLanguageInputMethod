@@ -64,6 +64,7 @@ internal class HandwritingView(
         }
     }
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (!isEnabled) return false
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 if (strokes.size >= 64) return true

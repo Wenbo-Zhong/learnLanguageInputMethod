@@ -2,40 +2,28 @@
 #include <sentencepiece_processor.h>
 #include <string>
 #include <vector>
+#include "jni_utf8.h"
 
 extern "C" JNIEXPORT jlong JNICALL
-Java_dev_learnime_android_NativeSentencePiece_create(JNIEnv *env, jobject, jstring path) {
-    const char *value = env->GetStringUTFChars(path, nullptr);
+Java_dev_learnime_android_NativeSentencePiece_create(JNIEnv *env, jobject, jbyteArray path) {
+    auto value = li_jni_utf8(env, path);
+    if (env->ExceptionCheck()) return 0;
     auto *processor = new sentencepiece::SentencePieceProcessor();
     const auto status = processor->Load(value);
-    env->ReleaseStringUTFChars(path, value);
     if (!status.ok()) { delete processor; return 0; }
     return reinterpret_cast<jlong>(processor);
 }
 
-extern "C" JNIEXPORT jintArray JNICALL
-Java_dev_learnime_android_NativeSentencePiece_encode(JNIEnv *env, jobject, jlong handle, jstring text) {
-    const char *value = env->GetStringUTFChars(text, nullptr);
-    std::vector<int> ids;
-    auto *processor = reinterpret_cast<sentencepiece::SentencePieceProcessor *>(handle);
-    const auto status = processor->Encode(value, &ids);
-    env->ReleaseStringUTFChars(text, value);
-    if (!status.ok()) return env->NewIntArray(0);
-    auto output = env->NewIntArray(static_cast<jsize>(ids.size()));
-    env->SetIntArrayRegion(output, 0, static_cast<jsize>(ids.size()), ids.data());
-    return output;
-}
-
-extern "C" JNIEXPORT jstring JNICALL
-Java_dev_learnime_android_NativeSentencePiece_decode(JNIEnv *env, jobject, jlong handle, jintArray input) {
-    auto array = env->GetIntArrayElements(input, nullptr);
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_dev_learnime_android_NativeSentencePiece_decodeUtf8(JNIEnv *env, jobject, jlong handle, jintArray input) {
     const auto count = env->GetArrayLength(input);
-    std::vector<int> ids(array, array + count);
-    env->ReleaseIntArrayElements(input, array, JNI_ABORT);
+    std::vector<int> ids(count);
+    env->GetIntArrayRegion(input, 0, count, ids.data());
+    if (env->ExceptionCheck()) return nullptr;
     std::string output;
     auto *processor = reinterpret_cast<sentencepiece::SentencePieceProcessor *>(handle);
     const auto status = processor->Decode(ids, &output);
-    return status.ok() ? env->NewStringUTF(output.c_str()) : env->NewStringUTF("");
+    return status.ok() ? li_jni_bytes(env, output) : nullptr;
 }
 
 extern "C" JNIEXPORT void JNICALL

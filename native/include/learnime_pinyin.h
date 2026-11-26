@@ -26,7 +26,11 @@ int li_pinyin_user_word(li_pinyin *engine, const char *spelling, const char *wor
 int li_pinyin_clear_learning(li_pinyin *engine);
 // Selection identifies a saved search generation and decoder index/path pair.
 // Returns empty on stale/invalid selection. Learning can be disabled per editor.
+// Learning failure does not reject a valid selection. In-memory updates remain
+// pending and are retried by the next save.
 const char * li_pinyin_select(li_pinyin * engine, unsigned long long token, int index, const char * path, int learn);
+// Last optional learning error, cleared after successful persistence.
+const char * li_pinyin_learning_error(li_pinyin * engine);
 // UTF-8 newline-separated predictions for an explicit committed history.
 const char * li_pinyin_predict(li_pinyin * engine, const char * history);
 void li_pinyin_destroy(li_pinyin * engine);

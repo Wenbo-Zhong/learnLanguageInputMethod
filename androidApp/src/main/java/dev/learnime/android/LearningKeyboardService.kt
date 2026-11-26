@@ -99,8 +99,10 @@ class LearningKeyboardService : InputMethodService() {
     private val handwritingEngine by handwritingEngineDelegate
     private var handwriting: HandwritingView? = null
     private var handwritingJob: Job? = null
+    private var handwritingCommitJob: Job? = null
     private var handwritingMode = false
     private var handwritingWord = ""
+    private var handwritingCandidate = ""
     private var handwritingRevision = 0
     private var handwritingChoices: LinearLayout? = null
     private var voiceJob: Job? = null
@@ -407,6 +409,8 @@ class LearningKeyboardService : InputMethodService() {
     }
 
     private fun changeKeyboardMode(mode: KeyboardMode) = queueEdit {
+        if (!resolveHandwriting()) return@queueEdit
+        handwritingMode = false
         finishEnglish()
         // Finish pending composition with the same native selection checks as a space.
         if (session.composition.isNotEmpty()) {
@@ -800,7 +804,7 @@ class LearningKeyboardService : InputMethodService() {
     }
     private fun type(value: String) = queueEdit {
         if (handwritingMode) {
-            finishHandwriting(); handwritingJob?.cancel(); handwritingRevision++
+            if (!resolveHandwriting()) return@queueEdit
             handwritingMode = false; renderKeys(); renderCandidates()
         }
         if (session.mode == KeyboardMode.ENGLISH && value.length == 1 && (value[0] in 'a'..'z' || value[0] in 'A'..'Z') &&
@@ -915,7 +919,7 @@ class LearningKeyboardService : InputMethodService() {
     }
     private fun literal(value: String) {
         if (handwritingMode) {
-            queueEdit { finishHandwriting(); handwritingJob?.cancel(); handwritingRevision++; handwriting?.clear(); commit(value) }
+            queueEdit { if (resolveHandwriting()) commit(value) }
             return
         }
         if (session.mode == KeyboardMode.ENGLISH) {
@@ -928,7 +932,7 @@ class LearningKeyboardService : InputMethodService() {
     }
     private fun enter() = queueEdit {
         if (handwritingMode) {
-            finishHandwriting(); handwritingJob?.cancel(); handwritingRevision++; handwriting?.clear()
+            if (!resolveHandwriting()) return@queueEdit
         }
         finishEnglish()
         if (session.composition.isNotEmpty()) resolveNow({ session.candidates.isNotEmpty() }) { session.enter() }
@@ -943,7 +947,8 @@ class LearningKeyboardService : InputMethodService() {
     private fun backspace() = queueEdit {
         if (handwritingMode) {
             if (handwritingWord.isNotEmpty()) {
-                handwritingJob?.cancel(); handwritingRevision++; cancelComposing(); handwritingWord = ""
+                handwritingJob?.cancel(); handwritingCommitJob?.cancel(); handwritingRevision++
+                cancelComposing(); handwritingWord = ""; handwritingCandidate = ""
                 handwritingChoices?.removeAllViews()
                 return@queueEdit
             }
@@ -982,7 +987,8 @@ class LearningKeyboardService : InputMethodService() {
         super.onStartInput(attribute, restarting)
         languagePopup?.dismiss(); languagePopup = null; closeTools()
         handwritingJob?.cancel(); handwritingRevision++
-        handwritingMode = false; handwritingWord = ""; handwriting = null
+        handwritingCommitJob?.cancel()
+        handwritingMode = false; handwritingWord = ""; handwritingCandidate = ""; handwriting = null
         cancelComposing()
         englishWord = ""; englishChoices = emptyList(); capsLock = false
         lastCommit = ""; undoSelection = -1; lastSpace = 0L; lastShift = 0L
@@ -1028,7 +1034,8 @@ class LearningKeyboardService : InputMethodService() {
         if (!ownCommit && composing && candidatesStart >= 0 && newStart == candidatesEnd && newStart == newEnd) {
             composingStart = candidatesStart
         } else if (!ownCommit && (oldStart != newStart || oldEnd != newEnd) &&
-            (session.composition.isNotEmpty() || englishWord.isNotEmpty() || handwritingWord.isNotEmpty())) {
+            (session.composition.isNotEmpty() || englishWord.isNotEmpty() || handwritingWord.isNotEmpty() ||
+                handwritingCandidate.isNotEmpty() || (handwritingMode && handwriting?.hasStrokes == true))) {
             if ((englishWord.isNotEmpty() || handwritingWord.isNotEmpty()) && composing) {
                 // The editor has already moved its selection. Finalize the visible
                 // word in place; replacing composing text here would delete it or
@@ -1036,7 +1043,8 @@ class LearningKeyboardService : InputMethodService() {
                 currentInputConnection?.finishComposingText()
                 composing = false; composingStart = -1
             } else cancelComposing()
-            handwritingWord = ""; handwritingJob?.cancel(); handwritingRevision++
+            handwritingWord = ""; handwritingCandidate = ""; handwritingJob?.cancel(); handwritingCommitJob?.cancel(); handwritingRevision++
+            handwriting?.clear(); handwritingChoices?.removeAllViews()
             englishWord = ""; englishChoices = emptyList()
             session.clearComposition(); invalidateCandidates(); renderCandidates()
         }
@@ -1051,7 +1059,7 @@ class LearningKeyboardService : InputMethodService() {
             KeyEvent.KEYCODE_ESCAPE -> {
                 queueEdit {
                     cancelComposing(); englishWord = ""; englishChoices = emptyList()
-                    handwritingWord = ""; handwritingJob?.cancel(); handwritingRevision++
+                    handwritingWord = ""; handwritingCandidate = ""; handwritingJob?.cancel(); handwritingCommitJob?.cancel(); handwritingRevision++
                     handwriting?.clear(); handwritingChoices?.removeAllViews()
                     session.clearComposition(); invalidateCandidates(); renderCandidates()
                 }
@@ -1072,8 +1080,7 @@ class LearningKeyboardService : InputMethodService() {
     override fun onFinishInputView(finishingInput: Boolean) {
         languagePopup?.dismiss(); languagePopup = null
         if (englishWord.isNotEmpty()) commit(englishWord)
-        if (handwritingWord.isNotEmpty()) commit(handwritingWord)
-        handwritingWord = ""; handwritingJob?.cancel(); handwritingRevision++
+        finishHandwriting()
         closeTools(); cancelComposing(); englishWord = ""; englishChoices = emptyList()
         editorEpoch++; editActionJob?.cancel(); editActionJob = null
         session.clearComposition(); invalidateCandidates(); controller.reset()
@@ -1128,8 +1135,8 @@ class LearningKeyboardService : InputMethodService() {
     }
     private fun space() = queueEdit {
         if (handwritingMode) {
-            finishHandwriting(); handwritingJob?.cancel(); handwritingRevision++; handwriting?.clear()
-            handwritingChoices?.removeAllViews(); commit(" ")
+            if (!resolveHandwriting()) return@queueEdit
+            commit(" ")
             return@queueEdit
         }
         if (session.mode == KeyboardMode.ENGLISH) {
@@ -1197,8 +1204,7 @@ class LearningKeyboardService : InputMethodService() {
     }
     private fun showTool(name: String) = queueEdit {
         finishEnglish()
-        finishHandwriting()
-        handwritingJob?.cancel(); handwritingRevision++; handwriting?.clear()
+        if (!resolveHandwriting()) return@queueEdit
         if (session.composition.isNotEmpty()) {
             resolveNow({ session.candidates.isNotEmpty() }) { session.space() }
             if (session.composition.isNotEmpty()) return@queueEdit
@@ -1217,7 +1223,7 @@ class LearningKeyboardService : InputMethodService() {
         val popup = PopupWindow(panel, keys.width.coerceAtLeast(280.dp), -2, false).apply {
             inputMethodMode = PopupWindow.INPUT_METHOD_NOT_NEEDED; isOutsideTouchable = true
             setBackgroundDrawable(ui.rounded(ui.high, 16)); elevation = 12.dp.toFloat()
-            setOnDismissListener { stopVoice(); handwritingJob?.cancel(); handwriting?.clear() }
+            setOnDismissListener { stopVoice() }
         }
         toolPopup = popup
         when (name) {
@@ -1331,13 +1337,33 @@ class LearningKeyboardService : InputMethodService() {
         }
     }
     private fun finishHandwriting() {
-        if (handwritingWord.isNotEmpty()) {
-            val word = handwritingWord; handwritingWord = ""
-            commit(word)
+        val word = handwritingCandidate.ifEmpty { handwritingWord }
+        handwritingWord = ""; handwritingCandidate = ""
+        handwritingJob?.cancel(); handwritingCommitJob?.cancel(); handwritingRevision++
+        if (word.isNotEmpty()) commit(word)
+        handwriting?.clear(); handwritingChoices?.removeAllViews()
+    }
+    private suspend fun resolveHandwriting(): Boolean {
+        if (!handwritingMode) return true
+        val epoch = editorEpoch
+        val revision = handwritingRevision
+        val board = handwriting
+        board?.isEnabled = false
+        try {
+            // Recognition and the automatic marking delay are independent.
+            // A delimiter waits only for recognition, never for the delay.
+            handwritingJob?.join()
+            if (epoch != editorEpoch || revision != handwritingRevision) return false
+            if (handwritingCandidate.isEmpty() && handwritingWord.isEmpty() && board?.hasStrokes == true)
+                return false
+            finishHandwriting()
+            return true
+        } finally {
+            board?.isEnabled = true
         }
     }
     private fun handwritingPanel(panel: LinearLayout) {
-        handwritingJob?.cancel(); handwritingRevision++
+        handwritingJob?.cancel(); handwritingCommitJob?.cancel(); handwritingRevision++
         val epoch = editorEpoch
         val strip = LinearLayout(ui.context).apply { gravity = Gravity.CENTER_VERTICAL; isBaselineAligned = false }
         handwritingChoices = strip
@@ -1346,40 +1372,43 @@ class LearningKeyboardService : InputMethodService() {
         val board = HandwritingView(ui.context, ui.onSurface,
             preferences.getInt("handwritingThickness", 3).toFloat(),
             started = {
-                handwritingJob?.cancel(); handwritingRevision++
+                handwritingJob?.cancel(); handwritingCommitJob?.cancel(); handwritingRevision++
                 if (handwritingWord.isNotEmpty()) {
                     finishHandwriting()
                 }
+                handwritingCandidate = ""
                 strip.removeAllViews()
             }) { points ->
             val current = ++handwritingRevision
-            handwritingJob?.cancel(); strip.removeAllViews()
+            handwritingJob?.cancel(); handwritingCommitJob?.cancel(); handwritingCandidate = ""; strip.removeAllViews()
             if (points.isNotEmpty()) handwritingJob = scope.launch {
                 delay(120)
                 try {
                     val choices = handwritingEngine.recognize(points)
+                    val text = choices.firstOrNull()?.let { outputText(it) }.orEmpty()
                     if (current != handwritingRevision || epoch != editorEpoch || !handwritingMode) return@launch
+                    handwritingCandidate = text
                     choices.forEach { word ->
                         strip.addView(ui.button(word, if (word == choices.firstOrNull()) ui.primaryContainer else Color.TRANSPARENT,
                             ui.onSurface, 10, 24f) {
                             queueEdit {
                                 if (current != handwritingRevision || epoch != editorEpoch) return@queueEdit
-                                handwritingJob?.cancel()
+                                handwritingCommitJob?.cancel()
                                 val text = outputText(word)
                                 if (current != handwritingRevision || epoch != editorEpoch) return@queueEdit
-                                handwritingWord = ""; commit(text)
-                                handwriting?.clear(); handwritingRevision++; strip.removeAllViews()
+                                handwritingCandidate = text; finishHandwriting()
                             }
                         }, LinearLayout.LayoutParams(56.dp, -1))
                     }
                     if (choices.isNotEmpty()) {
-                        delay(KeyboardPolicy.handwritingDelay(preferences.getString("handwritingSpeed", "normal") ?: "normal"))
-                        val text = outputText(choices.first())
-                        if (current != handwritingRevision || epoch != editorEpoch || !handwritingMode) return@launch
-                        handwritingWord = text
-                        syncComposing(); handwriting?.clear()
-                        trace("handwriting ready revision=$current candidates=${choices.size}")
-                    }
+                        handwritingCommitJob = scope.launch {
+                            delay(KeyboardPolicy.handwritingDelay(preferences.getString("handwritingSpeed", "normal") ?: "normal"))
+                            if (current != handwritingRevision || epoch != editorEpoch || !handwritingMode) return@launch
+                            handwritingWord = handwritingCandidate
+                            syncComposing(); handwriting?.clear()
+                            trace("handwriting ready revision=$current candidates=${choices.size}")
+                        }
+                    } else strip.addView(ui.text("未识别到文字，请继续书写或清空", 12f, ui.muted))
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) {
                     if (current == handwritingRevision && epoch == editorEpoch)
@@ -1396,12 +1425,14 @@ class LearningKeyboardService : InputMethodService() {
                 "键盘" -> showTool("键盘")
                 "撤销" -> {
                     if (handwritingWord.isNotEmpty()) {
-                        cancelComposing(); handwritingWord = ""; handwritingRevision++
+                        handwritingCommitJob?.cancel(); cancelComposing()
+                        handwritingWord = ""; handwritingCandidate = ""; handwritingRevision++
                         strip.removeAllViews()
                     } else board.undo()
                 }
                 "清空" -> {
-                    handwritingRevision++; handwritingJob?.cancel(); cancelComposing(); handwritingWord = ""
+                    handwritingRevision++; handwritingJob?.cancel(); handwritingCommitJob?.cancel()
+                    cancelComposing(); handwritingWord = ""; handwritingCandidate = ""
                     board.clear(); strip.removeAllViews()
                 }
                 "空格" -> space()
@@ -1422,7 +1453,7 @@ class LearningKeyboardService : InputMethodService() {
         val start = ui.button("开始", ui.primaryContainer, ui.onPrimaryContainer, 10, 14f) {}
         buttons.addView(start, LinearLayout.LayoutParams(0, -1, 1f))
         buttons.addView(ui.button("停止", ui.high, ui.onSurface, 10, 14f) {
-            voiceService?.stop(); state.text = "已停止，可编辑并上屏"
+            stopVoice(); state.text = "已停止，可编辑并上屏"
         }, LinearLayout.LayoutParams(0, -1, 1f))
         buttons.addView(ui.button("上屏", ui.primary, ui.onPrimary, 10, 14f) {
             val text = result.text.toString()
@@ -1455,7 +1486,8 @@ class LearningKeyboardService : InputMethodService() {
                         }
                         org.vosk.Model(directory.absolutePath).also { loadedModel = it }
                     }
-                    if (generation != voiceGeneration || epoch != editorEpoch || sensitive) { model.close(); return@launch }
+                    ensureActive()
+                    if (generation != voiceGeneration || epoch != editorEpoch || sensitive) return@launch
                     voiceModel = model
                     loadedModel = null
                     val recognizer = org.vosk.Recognizer(model, 16000f); voiceRecognizer = recognizer

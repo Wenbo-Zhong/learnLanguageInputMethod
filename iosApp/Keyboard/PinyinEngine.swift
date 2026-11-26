@@ -43,6 +43,10 @@ final class PinyinEngine {
             let ok = handle.map { h in candidate.path.withCString {
                 String(cString: li_pinyin_select(h, UInt64(bitPattern: candidate.token), candidate.nativeIndex, $0, learn ? 1 : 0)) == candidate.text
             } } ?? false
+            if learn, let handle {
+                let error = String(cString: li_pinyin_learning_error(handle))
+                if !error.isEmpty { NSLog("LEARNIME_LIBIME_TRACE learning pending: %@", error) }
+            }
             DispatchQueue.main.async { completion(ok) }
         }
     }

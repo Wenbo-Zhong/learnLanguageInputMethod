@@ -50,7 +50,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     private var dictionary: EnglishDictionary?, converter: TraditionalConverter?
     private let clips = ClipboardHistory(), handwritingEngine = HandwritingEngine()
     private var board: HandwritingView?, handwritingPending: DispatchWorkItem?
-    private var handwritingRevision = 0, handwritingWord = ""
+    private var handwritingChoices: UIStackView?
+    private var handwritingRevision = 0, handwritingWord = "", handwritingCandidate = ""
     private var editField: Int?, draft = ["", ""], originalWord: [String]?
     private var editingShortcut = false
     private var modeBeforeForm: KeyboardMode?
@@ -176,7 +177,10 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         preedit.textColor = palette.primary; english.textColor = palette.ink
     }
     private func changeMode(_ mode: KeyboardMode) {
-        finishEnglish(); finishHandwriting(); cancelMarked(); invalidateCandidates()
+        resolveHandwriting { self.changeModeNow(mode) }
+    }
+    private func changeModeNow(_ mode: KeyboardMode) {
+        finishEnglish(); cancelMarked(); invalidateCandidates()
         session.changeMode(value: mode); prefs.set(mode.name, forKey: "keyboardMode")
         if mode != .english { prefs.set(mode.name, forKey: "chineseMode") }
         tool = nil; panelScroll.isHidden = true; renderKeys(); renderCandidates()
@@ -537,44 +541,45 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         }
     }
     private func space() {
-        queueEdit {
-            if self.candidateLoading && !self.session.composition.isEmpty {
-                self.deferred = { [weak self] in self?.space(); self?.drainEdits() }; return
-            }
-            if !self.session.composition.isEmpty {
-                if self.session.candidates.isEmpty { self.commit(self.session.takeRaw()); self.requestCandidates() }
-                else { self.choose(0) }
-                return
-            }
-            if !self.englishWord.isEmpty {
-                let value = self.prefs.bool(forKey: "englishCorrection") ? self.dictionary?.correction(self.englishWord) ?? self.englishWord : self.englishWord
-                self.finishEnglish(value)
-            }
-            self.finishHandwriting()
-            let before = self.textDocumentProxy.documentContextBeforeInput ?? ""
-            if self.prefs.bool(forKey: "doubleSpace"), KeyboardPolicy.shared.doubleSpace(context: before, elapsedMs: Int64(Date().timeIntervalSince(self.lastSpace) * 1000)) {
-                self.textDocumentProxy.deleteBackward(); self.commit(self.session.mode == .english ? ". " : "。")
-            } else { self.commit(" ") }
-            self.lastSpace = Date(); self.autoCapitalization(); self.renderKeys(); self.renderCandidates()
+        queueEdit { self.resolveHandwriting { self.spaceNow() } }
+    }
+    private func spaceNow() {
+        if candidateLoading && !session.composition.isEmpty {
+            deferred = { [weak self] in self?.spaceNow(); self?.drainEdits() }; return
         }
+        if !session.composition.isEmpty {
+            if session.candidates.isEmpty { commit(session.takeRaw()); requestCandidates() }
+            else { choose(0) }
+            return
+        }
+        if !englishWord.isEmpty {
+            let value = prefs.bool(forKey: "englishCorrection") ? dictionary?.correction(englishWord) ?? englishWord : englishWord
+            finishEnglish(value)
+        }
+        let before = textDocumentProxy.documentContextBeforeInput ?? ""
+        if prefs.bool(forKey: "doubleSpace"), KeyboardPolicy.shared.doubleSpace(context: before, elapsedMs: Int64(Date().timeIntervalSince(lastSpace) * 1000)) {
+            textDocumentProxy.deleteBackward(); commit(session.mode == .english ? ". " : "。")
+        } else { commit(" ") }
+        lastSpace = Date(); autoCapitalization(); renderKeys(); renderCandidates()
     }
     private func literal(_ text: String) {
-        queueEdit {
-            self.finishEnglish(); self.finishHandwriting()
-            if self.candidateLoading && !self.session.composition.isEmpty {
-                self.deferred = { [weak self] in self?.literal(text); self?.drainEdits() }; return
-            }
-            if self.session.composition.isEmpty { self.commit(text) }
-            else if let first = self.session.candidates.first, first.consumed == self.session.composition.count, first.correction.isEmpty { self.choose(0, suffix: text) }
-            self.autoCapitalization(); self.renderCandidates()
+        queueEdit { self.resolveHandwriting { self.literalNow(text) } }
+    }
+    private func literalNow(_ text: String) {
+        finishEnglish()
+        if candidateLoading && !session.composition.isEmpty {
+            deferred = { [weak self] in self?.literalNow(text); self?.drainEdits() }; return
         }
+        if session.composition.isEmpty { commit(text) }
+        else if let first = session.candidates.first, first.consumed == session.composition.count, first.correction.isEmpty { choose(0, suffix: text) }
+        autoCapitalization(); renderCandidates()
     }
     private func backspace() {
         queueEdit {
             if !self.englishWord.isEmpty {
                 self.englishWord.removeLast(); self.englishChoices = []; self.syncMarked(); self.renderCandidates(); return
             }
-            if !self.handwritingWord.isEmpty { self.cancelMarked(); self.handwritingWord = ""; self.handwritingRevision += 1; return }
+            if !self.handwritingWord.isEmpty { self.discardHandwriting(); return }
             if self.board?.hasStrokes == true, self.tool == "手写" { self.board?.undo(); return }
             if let field = self.editField { if !self.draft[field].isEmpty { self.draft[field].removeLast() }; self.renderForm(); return }
             if self.session.backspace() { self.requestCandidates() }
@@ -633,9 +638,8 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
     }
     private func output(_ text: String) -> String { prefs.bool(forKey: "traditional") ? converter?.convert(text) ?? text : text }
     private func openTool(_ name: String) {
-        queueEdit {
-            self.finishEnglish(); self.finishHandwriting(); self.cancelMarked()
-            self.handwritingPending?.cancel(); self.handwritingRevision += 1
+        queueEdit { self.resolveHandwriting {
+            self.finishEnglish(); self.cancelMarked()
             self.session.clearComposition(); self.invalidateCandidates(); self.expandedCandidates = false
             self.editField = nil; self.form.isHidden = true
             self.tool = name; self.clear(self.panel); self.panelScroll.isHidden = name == "手写"; self.keys.isHidden = name != "手写"
@@ -653,10 +657,13 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             default: break
             }
             self.renderKeys(); self.renderCandidates()
-        }
+        } }
     }
     private func closePanel() {
-        finishEnglish(); finishHandwriting(); cancelMarked(); handwritingPending?.cancel(); handwritingRevision += 1
+        queueEdit { self.resolveHandwriting { self.closePanelNow() } }
+    }
+    private func closePanelNow() {
+        finishEnglish(); cancelMarked()
         tool = nil; editField = nil; form.isHidden = true; panelScroll.isHidden = true
         if let mode = modeBeforeForm { session.changeMode(value: mode); modeBeforeForm = nil }
         renderKeys(); requestCandidates()
@@ -878,11 +885,41 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         panel.addArrangedSubview(values); render(groups[1].1)
     }
     private func finishHandwriting() {
-        if !handwritingWord.isEmpty { let word = handwritingWord; handwritingWord = ""; commit(word) }
+        let word = handwritingCandidate.isEmpty ? handwritingWord : handwritingCandidate
+        handwritingWord = ""; handwritingCandidate = ""
+        handwritingPending?.cancel(); handwritingRevision += 1
+        if !word.isEmpty { commit(word) }
+        board?.clear()
+        if let handwritingChoices { clear(handwritingChoices) }
+    }
+    private func discardHandwriting() {
+        cancelMarked(); handwritingWord = ""; handwritingCandidate = ""
+        handwritingPending?.cancel(); handwritingRevision += 1; board?.clear()
+        if let handwritingChoices { clear(handwritingChoices) }
+    }
+    private func resolveHandwriting(_ action: @escaping () -> Void) {
+        guard tool == "手写", handwritingCandidate.isEmpty, handwritingWord.isEmpty,
+              let board, board.hasStrokes else {
+            finishHandwriting(); action(); return
+        }
+        // Capture the current strokes. The engine queue waits for any running
+        // recognition; later edits stay behind this boundary until it resolves.
+        let request = handwritingRevision, points = board.points()
+        deferred = {}; board.isUserInteractionEnabled = false
+        handwritingEngine.recognize(points) { [weak self, weak board] words in
+            board?.isUserInteractionEnabled = true
+            guard let self, active else { return }
+            deferred = nil
+            if request == handwritingRevision, tool == "手写", let first = words.first {
+                handwritingCandidate = output(first); finishHandwriting(); action()
+            }
+            drainEdits()
+        }
     }
     private func renderHandwriting() {
         keys.isHidden = false; handwritingRevision += 1; handwritingPending?.cancel()
         let strip = UIStackView(); strip.spacing = 4
+        handwritingChoices = strip
         let scroll = UIScrollView(); scroll.addSubview(strip); strip.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
             strip.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor), strip.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor),
@@ -894,25 +931,31 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         board.layer.cornerRadius = 12; board.lineWidth = CGFloat(prefs.integer(forKey: "handwritingThickness")); board.accessibilityLabel = "中文手写画板"
         board.heightAnchor.constraint(equalToConstant: compact ? 120 : keyHeight * 4).isActive = true; keys.addArrangedSubview(board)
         board.began = { [weak self] in
-            guard let self else { return }; handwritingPending?.cancel(); handwritingRevision += 1; finishHandwriting(); clear(strip)
+            guard let self else { return }; handwritingPending?.cancel(); handwritingRevision += 1
+            if !handwritingWord.isEmpty { finishHandwriting() }
+            handwritingCandidate = ""; clear(strip)
         }
         board.changed = { [weak self, weak board, weak strip] points in
             guard let self, let board, let strip else { return }; handwritingPending?.cancel(); handwritingRevision += 1
-            let request = handwritingRevision; clear(strip)
+            let request = handwritingRevision; handwritingCandidate = ""; clear(strip)
             guard !points.isEmpty else { return }
             handwritingEngine.recognize(points) { [weak self] words in
                 guard let self, active, tool == "手写", request == handwritingRevision else { return }
+                handwritingCandidate = words.first.map(output) ?? ""
                 for word in words {
                     let b = button(output(word)) { [weak self] in
                         guard let self, request == handwritingRevision else { return }
-                        handwritingPending?.cancel(); handwritingWord = ""; commit(output(word)); board.clear(); handwritingRevision += 1; clear(strip)
+                        queueEdit {
+                            guard request == self.handwritingRevision else { return }
+                            self.handwritingCandidate = self.output(word); self.finishHandwriting()
+                        }
                     }
                     b.widthAnchor.constraint(equalToConstant: 52).isActive = true; strip.addArrangedSubview(b)
                 }
-                guard let first = words.first else { return }
+                guard !words.isEmpty else { return }
                 let work = DispatchWorkItem { [weak self] in
                     guard let self, active, request == handwritingRevision, tool == "手写" else { return }
-                    handwritingWord = output(first); syncMarked(); board.clear()
+                    handwritingWord = handwritingCandidate; syncMarked(); board.clear()
                 }
                 handwritingPending = work
                 let delay = Double(KeyboardPolicy.shared.handwritingDelay(speed: prefs.string(forKey: "handwritingSpeed") ?? "normal")) / 1000
@@ -923,12 +966,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
             guard let self else { return }
             switch name {
             case "键盘": closePanel()
-            case "清空": handwritingPending?.cancel(); handwritingRevision += 1; cancelMarked(); handwritingWord = ""; board.clear(); clear(strip)
+            case "清空": discardHandwriting()
             case "撤销", "⌫":
-                if !handwritingWord.isEmpty { cancelMarked(); handwritingWord = ""; handwritingRevision += 1; clear(strip) }
+                if !handwritingWord.isEmpty { discardHandwriting() }
                 else if board.hasStrokes { board.undo() } else if name == "⌫" { textDocumentProxy.deleteBackward() }
-            case "空格": finishHandwriting(); commit(" ")
-            default: finishHandwriting(); commit("\n")
+            case "空格": space()
+            default: literal("\n")
             }
         })
     }
@@ -947,11 +990,12 @@ final class KeyboardViewController: UIInputViewController, UIInputViewAudioFeedb
         super.textDidChange(textInput)
         if active {
             let context = textDocumentProxy.documentContextBeforeInput
-            if !committing && context != lastHostContext && (!session.composition.isEmpty || !englishWord.isEmpty || !handwritingWord.isEmpty) {
+            if !committing && context != lastHostContext && (!session.composition.isEmpty || !englishWord.isEmpty ||
+                !handwritingWord.isEmpty || !handwritingCandidate.isEmpty || (tool == "手写" && board?.hasStrokes == true)) {
                 editActions.removeAll()
                 if !englishWord.isEmpty || !handwritingWord.isEmpty { textDocumentProxy.unmarkText(); marked = "" }
                 else { cancelMarked() }
-                englishWord = ""; englishChoices = []; handwritingWord = ""
+                englishWord = ""; englishChoices = []; handwritingWord = ""; handwritingCandidate = ""
                 handwritingRevision += 1; handwritingPending?.cancel(); board?.clear()
                 session.clearComposition(); invalidateCandidates(); renderCandidates()
             }

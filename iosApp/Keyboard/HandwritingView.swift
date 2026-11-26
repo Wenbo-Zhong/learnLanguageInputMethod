@@ -30,7 +30,7 @@ final class HandwritingView: UIView {
     var hasStrokes: Bool { !strokes.isEmpty }
     func clear() { strokes = []; setNeedsDisplay() }
     func undo() { if hasStrokes { strokes.removeLast() }; setNeedsDisplay(); changed?(points()) }
-    private func points() -> [Int32] {
+    func points() -> [Int32] {
         strokes.enumerated().flatMap { index, stroke in stroke.flatMap {
             [Int32(index), Int32(1000 * min(max($0.x, 0), bounds.width) / max(bounds.width, 1)),
              Int32(1000 * min(max($0.y, 0), bounds.height) / max(bounds.height, 1))]
