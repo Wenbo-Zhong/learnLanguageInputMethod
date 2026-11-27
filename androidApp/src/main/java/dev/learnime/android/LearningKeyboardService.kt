@@ -28,10 +28,13 @@ import dev.learnime.shared.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlin.coroutines.resume
 
 class LearningKeyboardService : InputMethodService() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val session = KeyboardSession()
+    private val inputState = KeyboardInputState()
+    private val inputFlow = KeyboardInputFlow(inputState)
+    private val session get() = inputState.session
     private lateinit var source: TextView
     private lateinit var english: TextView
     private lateinit var status: TextView
@@ -46,8 +49,9 @@ class LearningKeyboardService : InputMethodService() {
     private lateinit var spellings: LinearLayout
     private var nineSpellings: LinearLayout? = null
     private var preeditOffsets: List<Int> = emptyList()
+    private var preeditRequest: SupplementalRequest? = null
     private var expandedCandidates = false
-    private var predictions: List<String> = emptyList()
+    private val predictions get() = inputState.predictions
     private var inputScene = "text"
     private var signedNumber = false
     private var decimalNumber = false
@@ -55,10 +59,21 @@ class LearningKeyboardService : InputMethodService() {
     private lateinit var engine: LocalEngine
     private lateinit var pinyin: PinyinEngine
     private lateinit var controller: TranslationController
-    private var candidateJob: Job? = null
-    private var editActionJob: Job? = null
-    private var editorEpoch = 0L
-    private val candidateCoordinator = CandidateCoordinator()
+    private val candidateBackend by lazy {
+        AndroidCandidateBackend(scope, pinyin, ::englishDictionary) {
+            if (preferences.getBoolean("traditional", false) && converter == null) traditionalConverter()
+        }
+    }
+    private val candidatePipeline: CandidatePipeline by lazy {
+        CandidatePipeline(inputFlow, candidateBackend) {
+            renderCandidates()
+            if (::preedit.isInitialized && candidatePipeline.error.isNotEmpty())
+                preedit.text = session.composition + " · " + candidatePipeline.error
+        }
+    }
+    private val editQueue = AndroidEditQueue(scope)
+    private val editorEpoch get() = editQueue.epoch
+    private val candidateCoordinator get() = inputState.coordinator
     private var sensitive = false
     private var languagePopup: PopupWindow? = null
     private val direction get() = if (session.mode == KeyboardMode.ENGLISH)
@@ -80,18 +95,16 @@ class LearningKeyboardService : InputMethodService() {
     }
     private val landscape get() = resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     private val keyHeight get() = if (landscape) 28.dp else preferences.getInt("keyHeight", 54).dp
-    private var englishWord = ""
-    private var englishChoices = emptyList<String>()
+    private val keyFactory by lazy { AndroidKeyFactory(preferences, session, { ui }, { landscape },
+        { keyHeight }, { handwritingMode }, ::enterLabel, ::feedback, ::backspace, ::moveCursor,
+        ::literal, ::showKeyboardOptions, ::showKeyPreview) }
+    private val englishWord get() = inputState.englishWord
+    private val englishChoices get() = inputState.englishChoices
     private var dictionary: EnglishDictionary? = null
     private var converter: TraditionalConverter? = null
     private val extrasMutex = Mutex()
-    private var capsLock = false
-    private var lastShift = 0L
-    private var lastSpace = 0L
     private var composing = false
     private var composingStart = -1
-    private var lastCommit = ""
-    private var undoSelection = -1
     private lateinit var keyboardRoot: LinearLayout
     private lateinit var keyboardBody: LinearLayout
     private var handwritingMode = false
@@ -114,8 +127,11 @@ class LearningKeyboardService : InputMethodService() {
         if (::keys.isInitialized && isInputViewShown) {
             if (key == "theme") { setInputView(onCreateInputView()); return@OnSharedPreferenceChangeListener }
             if (key == "englishSuggestions" && englishWord.isNotEmpty()) queueEdit { finishEnglish(); renderCandidates() }
-            applyLayout(); session.setAutoCorrection(preferences.getBoolean("autoCorrection", true))
-            renderKeys(); requestCandidates(); updateTranslation()
+            applyLayout()
+            queueEdit {
+                applyInput(inputFlow.setCorrection(preferences.getBoolean("autoCorrection", true)))
+                renderKeys(); requestCandidates(); updateTranslation()
+            }
         }
     }
     private suspend fun englishDictionary(): EnglishDictionary = withContext(Dispatchers.Default) {
@@ -126,10 +142,14 @@ class LearningKeyboardService : InputMethodService() {
     }
     private suspend fun outputText(text: String): String {
         if (!preferences.getBoolean("traditional", false) || sensitive) return text
-        return withContext(Dispatchers.Default) {
+        val epoch = editorEpoch
+        val result = withContext(Dispatchers.Default) {
             val value = traditionalConverter()
             value.convert(text)
         }
+        currentCoroutineContext().ensureActive()
+        if (epoch != editorEpoch) throw CancellationException("输入框已切换")
+        return result
     }
 
     override fun onCreate() {
@@ -235,8 +255,10 @@ class LearningKeyboardService : InputMethodService() {
             setOnTouchListener { _, event ->
                 if (event.actionMasked == MotionEvent.ACTION_UP) {
                     val offset = layout?.getOffsetForHorizontal(0, event.x - totalPaddingLeft) ?: 0
-                    session.moveCursor(preeditOffsets.getOrElse(offset) { session.composition.length })
-                    renderCandidates(); performClick()
+                    val request = preeditRequest
+                    val position = preeditOffsets.getOrElse(offset) { session.composition.length }
+                    if (request != null) queueEdit { applyInput(inputFlow.movePreedit(request, position)) }
+                    performClick()
                 }
                 true
             }
@@ -268,133 +290,7 @@ class LearningKeyboardService : InputMethodService() {
     }
 
     private fun button(label: String, action: () -> Unit): MaterialButton {
-        val isEnter = label == enterLabel()
-        val function = isEnter || label in listOf("⇧", "分词", "⌫", "123", "返回", "空格")
-        val fill = when (label) {
-            enterLabel() -> ui.primary
-            "空格" -> ui.secondaryContainer
-            "⇧" -> if (session.uppercase) ui.primaryContainer else ui.high
-            else -> if (function) ui.high else ui.lowest
-        }
-        val ink = when (label) {
-            enterLabel() -> ui.onPrimary
-            "空格" -> ui.onSecondaryContainer
-            "⇧" -> if (session.uppercase) ui.onPrimaryContainer else ui.onSurface
-            else -> ui.onSurface
-        }
-        val icon = when (label) {
-            "⇧" -> R.drawable.ic_shift
-            "⌫" -> R.drawable.ic_backspace
-            "↵" -> R.drawable.ic_enter
-            else -> null
-        }
-        val press = { feedback(label); action() }
-        val result = if (icon != null) ui.iconButton(icon, when (label) {
-            "⇧" -> if (session.uppercase) "切换小写" else "切换大写"
-            "⌫" -> "退格"
-            else -> "回车"
-        }, fill, ink, press) else ui.button(label, fill, ink, 10,
-            if (label.length == 1) (if (landscape) minOf(preferences.getInt("keyFont", 22), 18)
-                else preferences.getInt("keyFont", 22)).toFloat() else 14f, press)
-        result.cornerRadius = 10.dp
-        if (icon == null && label.length > 1 && label != "空格")
-            androidx.core.widget.TextViewCompat.setAutoSizeTextTypeUniformWithConfiguration(
-                result, 10, 14, 1, android.util.TypedValue.COMPLEX_UNIT_SP)
-        if (preferences.getBoolean("keyBorder", false)) {
-            result.strokeWidth = 1.dp; result.strokeColor = android.content.res.ColorStateList.valueOf(ui.outline)
-        }
-        if (label == "空格") result.text = if (session.mode == KeyboardMode.ENGLISH) "English" else "空格"
-        if (label == "⇧") result.isSelected = session.uppercase
-        if (label == "⌫") {
-            var repeated = false
-            var downX = 0f
-            var removed = 0
-            val repeat = object : Runnable {
-                override fun run() { repeated = true; backspace(); result.postDelayed(this, 65) }
-            }
-            result.setOnTouchListener { _, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> { repeated = false; downX = event.x; removed = 0; result.postDelayed(repeat, preferences.getInt("longPress", 400).toLong()) }
-                    MotionEvent.ACTION_MOVE -> {
-                        val count = ((downX - event.x) / 24.dp).toInt().coerceAtLeast(0)
-                        if (count > removed) {
-                            result.removeCallbacks(repeat); repeated = true
-                            repeat(count - removed) { backspace() }; removed = count
-                        }
-                    }
-                    MotionEvent.ACTION_UP -> { result.removeCallbacks(repeat); if (repeated) { result.isPressed = false; return@setOnTouchListener true } }
-                    MotionEvent.ACTION_CANCEL -> { result.removeCallbacks(repeat); result.isPressed = false }
-                }
-                false
-            }
-        } else if (label == "空格") {
-            result.text = if (handwritingMode) "手写" else when (session.mode) {
-                KeyboardMode.CHINESE_NINE_KEY -> "中文 · 九键"
-                KeyboardMode.CHINESE_QWERTY -> "中文 · 26键"
-                KeyboardMode.ENGLISH -> "English"
-            }
-            result.contentDescription = "空格，长按选择语言"
-            result.id = R.id.keyboard_space_key
-            result.setOnLongClickListener { showKeyboardOptions(result); true }
-            var lastX = 0f
-            var dragging = false
-            val step = 18.dp.toFloat()
-            result.setOnTouchListener { _, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> { lastX = event.x; dragging = false }
-                    MotionEvent.ACTION_MOVE -> {
-                        val steps = ((event.x - lastX) / step).toInt()
-                        if (steps != 0) {
-                            dragging = true; lastX += steps * step; moveCursor(steps); result.isPressed = false
-                        }
-                    }
-                    MotionEvent.ACTION_UP -> if (dragging) return@setOnTouchListener true
-                    MotionEvent.ACTION_CANCEL -> { dragging = false; result.isPressed = false }
-                }
-                false
-            }
-        } else if (label.length == 1 && label[0].isLetter()) {
-            val digit = "qwertyuiop".indexOf(label.lowercase())
-            result.setOnLongClickListener {
-                val choices = listOf(label.uppercase()) + if (digit >= 0) listOf(((digit + 1) % 10).toString()) else emptyList()
-                val content = LinearLayout(ui.context)
-                val popup = PopupWindow(content, -2, keyHeight, false).apply {
-                    inputMethodMode = PopupWindow.INPUT_METHOD_NOT_NEEDED
-                    isOutsideTouchable = true
-                    setBackgroundDrawable(ui.rounded(ui.high, 12)); elevation = 8.dp.toFloat()
-                }
-                choices.forEach { choice -> content.addView(ui.button(choice, ui.high, ui.onSurface) {
-                    literal(choice); popup.dismiss()
-                }, LinearLayout.LayoutParams(54.dp, -1)) }
-                popup.showAsDropDown(result, 0, -keyHeight * 2)
-                true
-            }
-            var held = false
-            val hold = Runnable { result.cancelLongPress(); held = result.performLongClick() }
-            result.setOnTouchListener { _, event ->
-                when (event.actionMasked) {
-                    MotionEvent.ACTION_DOWN -> {
-                        held = false
-                        result.postDelayed(hold, preferences.getInt("longPress", 400).toLong())
-                        if (preferences.getBoolean("preview", false)) showKeyPreview(result, label)
-                    }
-                    MotionEvent.ACTION_UP -> {
-                        result.removeCallbacks(hold)
-                        if (held) { result.isPressed = false; return@setOnTouchListener true }
-                    }
-                    MotionEvent.ACTION_CANCEL -> result.removeCallbacks(hold)
-                }
-                if (event.actionMasked == MotionEvent.ACTION_DOWN) {
-                    result.isPressed = true
-                    return@setOnTouchListener true
-                }
-                if (event.actionMasked == MotionEvent.ACTION_UP && !held) {
-                    result.isPressed = false; result.performClick(); return@setOnTouchListener true
-                }
-                false
-            }
-        }
-        return result
+        return keyFactory.button(label, action)
     }
     private fun row(parent: LinearLayout, labels: List<String>, height: Int = keyHeight, action: (String) -> Unit) {
         AndroidKeyboardLayout.row(parent, labels, height) { label ->
@@ -410,14 +306,10 @@ class LearningKeyboardService : InputMethodService() {
     private fun changeKeyboardMode(mode: KeyboardMode) = queueEdit {
         if (!resolveHandwriting()) return@queueEdit
         handwritingMode = false
-        finishEnglish()
-        // Finish pending composition with the same native selection checks as a space.
-        if (session.composition.isNotEmpty()) {
-            resolveNow(CompositionBoundary.SPACE) { session.space() }
-            if (session.composition.isNotEmpty()) return@queueEdit
-        }
-        invalidateCandidates(); predictions = emptyList(); expandedCandidates = false
-        controller.reset(); session.changeMode(mode)
+        if (!awaitCandidates()) return@queueEdit
+        applyInput(inputFlow.changeMode(mode))
+        if (session.mode != mode || session.composition.isNotEmpty()) return@queueEdit
+        expandedCandidates = false; controller.reset()
         preferences.edit().putString("mode", mode.name).apply {
             if (mode != KeyboardMode.ENGLISH) putString("chineseMode", mode.name)
         }.apply()
@@ -474,7 +366,7 @@ class LearningKeyboardService : InputMethodService() {
         row(keys, listOf(if (session.symbols) "返回" else "123", "🌐", if (englishMode) "," else "，", "空格",
             if (bottomDelete) "⌫" else if (englishMode) "." else "。", enterLabel())) { key ->
             when (key) {
-                "123", "返回" -> queueEdit { session.toggleSymbols(); renderKeys() }
+                "123", "返回" -> queueEdit { applyInput(inputFlow.toggleSymbols()) }
                 "空格" -> space()
                 "⌫" -> backspace()
                 enterLabel() -> enter()
@@ -495,7 +387,7 @@ class LearningKeyboardService : InputMethodService() {
         tools.addView(ui.text("长按空格选择语言", 11f, ui.muted).apply { gravity = Gravity.CENTER },
             LinearLayout.LayoutParams(0, -2, 1f))
         tools.addView(ui.button(if (englishMode) "'" else "原样", Color.TRANSPARENT, ui.muted, 16, 12f) {
-            if (englishMode) literal("'") else queueEdit { commit(session.takeRaw()); requestCandidates() }
+            if (englishMode) literal("'") else queueEdit { applyInput(inputFlow.takeRaw(inputState.snapshot())) }
         }, LinearLayout.LayoutParams(48.dp, -1))
         if (bottomDelete) tools.addView(ui.button(if (englishMode) "." else "。", Color.TRANSPARENT, ui.muted, 16, 16f) {
             literal(if (englishMode) "." else "。")
@@ -525,15 +417,14 @@ class LearningKeyboardService : InputMethodService() {
         content.addView(ui.button(if (session.autoCorrection) "关闭自动纠错" else "开启自动纠错", ui.high, ui.onSurface, 12, 14f) {
             popup.dismiss()
             queueEdit {
-                session.setAutoCorrection(!session.autoCorrection)
+                applyInput(inputFlow.setCorrection(!session.autoCorrection))
                 preferences.edit().putBoolean("autoCorrection", session.autoCorrection).apply()
-                requestCandidates()
             }
         }, LinearLayout.LayoutParams(-1, 44.dp))
         content.addView(ui.button("其他输入法", ui.high, ui.onSurface, 12, 14f) {
             popup.dismiss()
             queueEdit {
-                session.clearComposition(); invalidateCandidates(); renderCandidates()
+                applyInput(inputFlow.clearComposition())
                 (getSystemService(INPUT_METHOD_SERVICE) as android.view.inputmethod.InputMethodManager).showInputMethodPicker()
             }
         }, LinearLayout.LayoutParams(-1, 44.dp))
@@ -554,8 +445,8 @@ class LearningKeyboardService : InputMethodService() {
             button(label) {
                 when (label) {
                     "⌫" -> backspace()
-                    "清除" -> queueEdit { session.clearComposition(); requestCandidates() }
-                    else -> queueEdit { session.toggleSymbols(); renderKeys(); renderCandidates() }
+                    "清除" -> queueEdit { applyInput(inputFlow.clearComposition()) }
+                    else -> queueEdit { applyInput(inputFlow.toggleSymbols()) }
                 }
             }
         }
@@ -571,14 +462,14 @@ class LearningKeyboardService : InputMethodService() {
                 }
             }, side = side, bottom = listOf(button("，") { literal("，") }, languageKey(),
                 button("空格") { space() }, button("。") { literal("。") }),
-            left = button("符") { queueEdit { session.toggleSymbols(); renderKeys(); renderCandidates() } },
+            left = button("符") { queueEdit { applyInput(inputFlow.toggleSymbols()) } },
             right = button(enterLabel()) { enter() })
         if (inputScene == "email" || inputScene == "url")
             row(keys, if (inputScene == "email") listOf("@", ".", "_", "-", ".com") else listOf("/", ".", ":", "-", ".com"),
                 if (landscape) 28.dp else 36.dp) { literal(it) }
         val tools = LinearLayout(ui.context).apply { isBaselineAligned = false }
         tools.addView(ui.button("原样", Color.TRANSPARENT, ui.muted, 12, 12f) {
-            queueEdit { commit(session.takeRaw()); requestCandidates() }
+            queueEdit { applyInput(inputFlow.takeRaw(inputState.snapshot())) }
         }, LinearLayout.LayoutParams(52.dp, 30.dp))
         tools.addView(ui.text("长按空格选择语言 · 左侧选择音节", 11f, ui.muted).apply { gravity = Gravity.CENTER },
             LinearLayout.LayoutParams(0, 30.dp, 1f))
@@ -591,15 +482,17 @@ class LearningKeyboardService : InputMethodService() {
     }
     private fun renderNineSpellings() {
         val column = nineSpellings ?: return
+        val model = inputFlow.presentation(preferences.getBoolean("mixed", true))
         column.removeAllViews()
-        session.lockedSyllables.forEachIndexed { index, syllable ->
+        model.lockedSyllables.forEachIndexed { index, syllable ->
             column.addView(ui.button("${syllable.spelling} ×", ui.primaryContainer, ui.onPrimaryContainer, 8, 14f) {
-                queueEdit { session.unlockFrom(index); requestCandidates() }
+                queueEdit { applyInput(inputFlow.unlockSyllable(model.request, index)) }
             }, LinearLayout.LayoutParams(-1, 38.dp))
         }
-        session.nextSyllables.forEach { syllable ->
+        model.syllableChoices.forEach { choice ->
+            val syllable = choice.syllable
             column.addView(ui.button(syllable.spelling, Color.TRANSPARENT, ui.onSurface, 8, 18f) {
-                queueEdit { if (session.lockNext(syllable)) requestCandidates() }
+                queueEdit { applyInput(inputFlow.lockSyllable(model.request, syllable)) }
             }.apply { contentDescription = if (syllable.partial) "限定首字母 ${syllable.spelling}" else "锁定音节 ${syllable.spelling}" },
                 LinearLayout.LayoutParams(-1, 38.dp))
         }
@@ -618,27 +511,15 @@ class LearningKeyboardService : InputMethodService() {
             return
         }
         val nine = session.mode == KeyboardMode.CHINESE_NINE_KEY
-        val offsets = mutableListOf(0)
-        val display = StringBuilder()
-        var rawEnd = 0
-        if (nine) session.candidates.firstOrNull()?.syllables?.forEach { syllable ->
-            if (display.isNotEmpty()) { display.append(' '); offsets.add(rawEnd) }
-            syllable.spelling.forEachIndexed { index, c ->
-                display.append(c)
-                offsets.add(rawEnd + ((syllable.end - rawEnd) * (index + 1) / syllable.spelling.length))
-            }
-            rawEnd = syllable.end
-        }
-        session.composition.drop(rawEnd).forEach { c -> display.append(c); offsets.add(++rawEnd) }
-        val displayCursor = offsets.indexOfLast { it <= session.cursor }.coerceAtLeast(0)
-        offsets.add(displayCursor + 1, session.cursor)
-        preeditOffsets = offsets
-        preedit.text = display.substring(0, displayCursor) + "│" + display.substring(displayCursor) +
+        val presentation = inputFlow.presentation(preferences.getBoolean("mixed", true))
+        val model = presentation.preeditModel
+        preeditOffsets = model.offsets
+        preeditRequest = presentation.request
+        preedit.text = model.cursorText +
             if (session.needsSegmentation) " · 长拼音，请分段选词" else ""
-        session.lockedSyllables.lastOrNull()?.let { locked ->
+        if (model.lockedEnd > 0) {
             preedit.text = SpannableString(preedit.text).apply {
-                val end = offsets.indexOfLast { it <= locked.end }.coerceAtLeast(0)
-                setSpan(android.text.style.UnderlineSpan(), 0, end, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                setSpan(android.text.style.UnderlineSpan(), 0, model.lockedEnd, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
             }
         }
         val numeric = inputScene in listOf("number", "phone")
@@ -661,14 +542,13 @@ class LearningKeyboardService : InputMethodService() {
             spellings.addView(ui.button(if (session.autoCorrection) "纠错开" else "纠错关",
                 if (session.autoCorrection) ui.secondaryContainer else Color.TRANSPARENT, ui.onSurface, 12, 12f) {
                 queueEdit {
-                    session.setAutoCorrection(!session.autoCorrection)
+                    applyInput(inputFlow.setCorrection(!session.autoCorrection))
                     preferences.edit().putBoolean("autoCorrection", session.autoCorrection).apply()
-                    requestCandidates()
                 }
             }, LinearLayout.LayoutParams(-2, -1))
-            session.lockedSyllables.forEachIndexed { index, syllable ->
+            presentation.lockedSyllables.forEachIndexed { index, syllable ->
                 spellings.addView(ui.button("✓ ${syllable.spelling} ×", ui.primaryContainer, ui.onPrimaryContainer, 12, 12f) {
-                    queueEdit { session.unlockFrom(index); requestCandidates() }
+                    queueEdit { applyInput(inputFlow.unlockSyllable(presentation.request, index)) }
                 }, LinearLayout.LayoutParams(-2, -1))
             }
             if (session.nextSyllables.isNotEmpty()) {
@@ -676,11 +556,11 @@ class LearningKeyboardService : InputMethodService() {
                     gravity = Gravity.CENTER; setPadding(8.dp, 0, 8.dp, 0)
                 }, LinearLayout.LayoutParams(-2, -1))
             }
-            session.nextSyllables.forEach { syllable ->
-                val begin = session.lockedSyllables.lastOrNull()?.end ?: 0
-                val typed = session.composition.substring(begin, syllable.end).trim('\'')
+            presentation.syllableChoices.forEach { choice ->
+                val syllable = choice.syllable
+                val typed = choice.typed.trim('\'')
                 spellings.addView(ui.button("${syllable.spelling}（$typed）", Color.TRANSPARENT, ui.onSurface, 12, 12f) {
-                    queueEdit { if (session.lockNext(syllable)) requestCandidates() }
+                    queueEdit { applyInput(inputFlow.lockSyllable(presentation.request, syllable)) }
                 }, LinearLayout.LayoutParams(-2, -1))
             }
         }
@@ -690,40 +570,35 @@ class LearningKeyboardService : InputMethodService() {
         keys.visibility = if (expandedScroll.visibility == View.VISIBLE) View.GONE else View.VISIBLE
         candidateExpand.visibility = if (session.candidates.isNotEmpty()) View.VISIBLE else View.GONE
         candidateExpand.text = if (expandedCandidates) "收起" else "展开"
-        AndroidCandidatePanel.render(ui, candidates, expanded, session.candidates, nine, expandedCandidates,
+        AndroidCandidatePanel.render(ui, candidates, expanded, presentation.pinyin, nine, expandedCandidates,
             preferences.getInt("candidateFont", 20).toFloat(),
             { converter?.takeIf { preferences.getBoolean("traditional", false) }?.convert(it) ?: it },
             ::chooseCandidate, ::forgetCandidate)
-        if (session.composition.isNotEmpty() && preferences.getBoolean("mixed", true) && session.lockedSyllables.isEmpty()) {
-            val raw = session.composition
+        if (presentation.showRaw) {
+            val raw = presentation.raw
+            val expected = presentation.request
             candidates.addView(ui.button(raw, ui.high, ui.onSurface, 12, 18f) {
-                queueEdit { if (session.composition == raw) { commit(session.takeRaw()); requestCandidates() } }
+                queueEdit { applyInput(inputFlow.takeRaw(expected)) }
             }.apply { contentDescription = "原文 $raw" }, LinearLayout.LayoutParams(-2, -1))
         }
-        englishChoices.forEach { word ->
-            val expectedWord = englishWord
-            val expectedInput = session.composition
-            val expectedRevision = session.revision
+        presentation.english.forEach { word ->
+            val expected = presentation.request
             candidates.addView(ui.button(word, ui.primaryContainer, ui.onPrimaryContainer, 12, 18f) {
                 queueEdit {
-                    if (englishWord != expectedWord || session.composition != expectedInput || session.revision != expectedRevision) return@queueEdit
-                    if (englishWord.isNotEmpty()) finishEnglish(word)
-                    else if (session.composition.isNotEmpty() && session.lockedSyllables.isEmpty()) {
-                        session.clearComposition(); commit(word); requestCandidates()
-                    }
-                    renderCandidates()
+                    applyInput(inputFlow.chooseSupplemental(expected, word, false))
                 }
             }, LinearLayout.LayoutParams(-2, -1))
         }
-        if (session.composition.isEmpty()) predictions.forEach { prediction ->
+        presentation.predictions.forEach { prediction ->
+            val expected = presentation.request
             candidates.addView(ui.button(prediction, Color.TRANSPARENT, ui.onSurface, 12, 20f) {
-                resolve { if (session.composition.isEmpty()) prediction else "" }
+                queueEdit { applyInput(inputFlow.chooseSupplemental(expected, prediction, true)) }
             }, LinearLayout.LayoutParams(-2, -1))
         }
         if (session.candidates.isEmpty() && predictions.isEmpty() && englishChoices.isEmpty()) candidates.addView(ui.text("", 12f, ui.muted).apply {
             setPadding(12.dp, 0, 12.dp, 0)
             text = when {
-                session.composition.isNotEmpty() && candidateJob?.isActive == true -> "正在生成候选…"
+                session.composition.isNotEmpty() && candidatePipeline.loading -> "正在生成候选…"
                 session.composition.isNotEmpty() -> "暂无候选，可退格修改或点「原样」"
                 session.mode == KeyboardMode.CHINESE_NINE_KEY -> "九键拼音"
                 session.mode == KeyboardMode.CHINESE_QWERTY -> "全拼 / 简拼 · 空格选首词"
@@ -731,135 +606,110 @@ class LearningKeyboardService : InputMethodService() {
             }
         })
     }
-    private fun invalidateCandidates() { candidateCoordinator.invalidate(); candidateJob?.cancel(); candidateJob = null }
+    private fun invalidateCandidates() { candidatePipeline.invalidate() }
     private fun requestCandidates() {
-        invalidateCandidates()
-        val request = candidateCoordinator.snapshot(session)
-        val input = request.input
-        val mode = request.mode
-        val editRevision = request.revision
-        val locks = request.locks
-        val corrections = request.corrections
         syncComposing()
-        trace("search length=${input.length} cursor=${session.cursor} revision=$editRevision locks=${session.lockedSyllables.size} correction=$corrections")
-        predictions = emptyList()
-        if (mode != KeyboardMode.ENGLISH) englishChoices = emptyList()
-        if (input.isEmpty()) {
-            expandedCandidates = false
-            if (!sensitive && mode != KeyboardMode.ENGLISH && preferences.getBoolean("prediction", true)) candidateJob = scope.launch {
-                val history = currentInputConnection?.getTextBeforeCursor(16, 0)?.toString().orEmpty()
-                val result = pinyin.predict(history)
-                if (candidateCoordinator.isCurrent(request, session)) {
-                    predictions = result; candidateJob = null; renderCandidates()
-                }
-            }
-            renderCandidates(); return
-        }
-        candidateJob = scope.launch {
-            try {
-                if (preferences.getBoolean("traditional", false) && converter == null)
-                    traditionalConverter()
-                val result = pinyin.search(input, mode == KeyboardMode.CHINESE_NINE_KEY, locks, corrections)
-                val mixedWords = if (!sensitive && locks.isEmpty() && preferences.getBoolean("mixed", true) && input.length <= 20) {
-                    val dictionary = englishDictionary()
-                    withContext(Dispatchers.Default) {
-                        if (mode == KeyboardMode.CHINESE_NINE_KEY) dictionary.nineSuggestions(input)
-                        else dictionary.suggestions(input).drop(1).take(3)
-                    }
-                } else emptyList()
-                val shortcut = if (!sensitive && locks.isEmpty()) runCatching {
-                    org.json.JSONObject(preferences.getString("shortcuts", "{}")).optString(input)
-                }.getOrDefault("") else ""
-                if (candidateCoordinator.isCurrent(request, session)) {
-                    englishChoices = (listOf(shortcut).filter { it.isNotEmpty() } + mixedWords).distinct()
-                    if (session.applyCandidates(input, mode, result, editRevision)) { candidateJob = null; renderCandidates() }
-                }
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { if (candidateCoordinator.isCurrent(request, session)) { preedit.text = "$input · ${e.message}" } }
-        }
-        renderCandidates()
+        if (session.composition.isEmpty()) expandedCandidates = false
+        val shortcut = runCatching {
+            org.json.JSONObject(preferences.getString("shortcuts", "{}") ?: "{}").optString(session.composition)
+        }.getOrDefault("").orEmpty()
+        candidatePipeline.refresh(!sensitive && inputScene == "text",
+            preferences.getBoolean("prediction", true), preferences.getBoolean("mixed", true),
+            currentInputConnection?.getTextBeforeCursor(16, 0)?.toString().orEmpty(), shortcut)
     }
     private fun type(value: String) = queueEdit {
         if (handwritingMode) {
             if (!resolveHandwriting()) return@queueEdit
             handwritingMode = false; renderKeys(); renderCandidates()
         }
-        if (session.mode == KeyboardMode.ENGLISH && value.length == 1 && (value[0] in 'a'..'z' || value[0] in 'A'..'Z') &&
-            !sensitive && inputScene == "text" && preferences.getBoolean("englishSuggestions", true)) {
-            englishWord += if (session.uppercase) value.uppercase() else value
-            syncComposing()
-            if (!capsLock && session.uppercase) { session.toggleShift(); renderKeys() }
-            val input = englishWord
-            candidateJob?.cancel()
-            candidateJob = scope.launch {
-                val data = englishDictionary()
-                val result = withContext(Dispatchers.Default) { data.suggestions(input) }
-                if (englishWord == input) { englishChoices = result; renderCandidates() }
-            }
-            renderCandidates(); return@queueEdit
-        }
-        val before = session.composition
-        val direct = session.key(value)
-        if (direct.isNotEmpty()) {
-            commit(direct)
-            if (session.mode == KeyboardMode.ENGLISH && !capsLock && session.uppercase) { session.toggleShift(); renderKeys() }
-        }
-        if (session.composition != before) requestCandidates()
+        applyInput(inputFlow.type(value, inputOptions()))
     }
     private fun queueEdit(action: suspend () -> Unit) {
-        // Serialize user intent across candidate/JNI suspension; never drop the
-        // letter following a pending space. Editor epochs prevent cross-field input.
-        val previous = editActionJob
-        val epoch = editorEpoch
-        editActionJob = scope.launch {
-            previous?.join()
-            if (epoch == editorEpoch) action()
+        editQueue.enqueue(action)
+    }
+    private fun resetEditQueue() {
+        editQueue.reset()
+    }
+    private suspend fun awaitCandidates(): Boolean {
+        return suspendCancellableCoroutine { continuation ->
+            candidatePipeline.whenReady { current ->
+                if (continuation.isActive) continuation.resume(current)
+            }
         }
     }
-    private fun resolve(boundary: CompositionBoundary? = null, action: () -> String) =
-        queueEdit { resolveNow(boundary, action) }
-    private suspend fun resolveNow(boundary: CompositionBoundary?, action: () -> String) {
-        val request = candidateCoordinator.snapshot(session)
-        val pending = candidateJob
-        if (request.input.isNotEmpty()) pending?.join()
-        if (!candidateCoordinator.isCurrent(request, session)) return
-        val candidate = session.candidates.firstOrNull()
-        if (candidate != null && boundary != null &&
-            candidateCoordinator.boundary(session, boundary) == BoundaryResolution.SELECT_FIRST) {
-            if (!pinyin.select(candidate, !sensitive && preferences.getBoolean("learning", true))) { requestCandidates(); return }
-            if (!candidateCoordinator.isCurrent(request, session)) return
+    private fun inputOptions() = InputOptions(
+        !sensitive && inputScene == "text", preferences.getBoolean("englishSuggestions", true),
+        preferences.getBoolean("englishCorrection", false), preferences.getBoolean("doubleSpace", false),
+        preferences.getBoolean("autoCap", true))
+    private suspend fun applyInput(transition: InputTransition) {
+        for (effect in transition.effects) when (effect.kind) {
+            InputEffectKind.COMMIT -> commit(effect.text)
+            InputEffectKind.CONVERT_COMMIT -> commit(outputText(effect.text))
+            InputEffectKind.DELETE_BACKWARD -> {
+                val connection = currentInputConnection
+                if (!connection?.getSelectedText(0).isNullOrEmpty()) connection?.commitText("", 1)
+                else connection?.deleteSurroundingTextInCodePoints(1, 0)
+                updateTranslation()
+            }
+            InputEffectKind.HOST_ENTER -> {
+                val info = currentInputEditorInfo
+                val action = (info?.imeOptions ?: 0) and EditorInfo.IME_MASK_ACTION
+                if ((info?.imeOptions ?: 0) and EditorInfo.IME_FLAG_NO_ENTER_ACTION == 0 &&
+                    action !in listOf(EditorInfo.IME_ACTION_NONE, EditorInfo.IME_ACTION_UNSPECIFIED))
+                    currentInputConnection?.performEditorAction(action)
+                else commit("\n")
+            }
+            InputEffectKind.SYNC_MARKED -> syncComposing()
+            InputEffectKind.SEARCH_PINYIN -> requestCandidates()
+            InputEffectKind.SEARCH_ENGLISH -> searchEnglish(effect.text)
+            InputEffectKind.INVALIDATE -> invalidateCandidates()
+            InputEffectKind.RENDER -> renderCandidates()
+            InputEffectKind.RENDER_KEYS -> renderKeys()
+            InputEffectKind.CAPITALIZE -> autoCapitalization()
+            InputEffectKind.PRESERVE -> preedit.text = session.composition + " · 请先选词、修改或点原样"
+            InputEffectKind.OPEN_TOOL -> presentTool(effect.text)
+            InputEffectKind.MOVE_CURSOR -> moveHostCursor(effect.amount)
+            InputEffectKind.DELETE_TEXT -> {
+                currentInputConnection?.deleteSurroundingTextInCodePoints(effect.text.codePointCount(0, effect.text.length), 0)
+                updateTranslation()
+            }
         }
-        val result = action()
-        if (result.isEmpty()) {
-            renderCandidates()
-            if (session.composition.isNotEmpty())
-                preedit.text = preedit.text.toString() + " · 请先选词、修改或点原样"
-            return
+        transition.selection?.let { selection ->
+            if (!inputFlow.canSelect(selection)) return
+            val accepted = pinyin.select(selection.candidate, !sensitive && preferences.getBoolean("learning", true))
+            if (accepted) expandedCandidates = false
+            applyInput(inputFlow.completeSelection(selection, accepted))
         }
-        commit(outputText(result)); requestCandidates()
+    }
+    private fun searchEnglish(input: String) {
+        candidatePipeline.refreshEnglish(input)
+    }
+    private suspend fun boundaryNow(boundary: CompositionBoundary, literal: String = "") {
+        if (!awaitCandidates()) return
+        val options = inputOptions()
+        val raw = englishWord
+        val corrected = if (boundary == CompositionBoundary.SPACE && options.englishCorrection && raw.isNotEmpty())
+            withContext(Dispatchers.Default) { englishDictionary().correction(raw) } else raw
+        currentCoroutineContext().ensureActive()
+        applyInput(inputFlow.boundary(boundary, literal,
+            currentInputConnection?.getTextBeforeCursor(80, 0)?.toString().orEmpty(),
+            android.os.SystemClock.uptimeMillis(), corrected, options))
     }
     private fun chooseCandidate(index: Int, expected: PinyinCandidate) {
         val candidate = session.candidates.getOrNull(index) ?: return
         if (candidate != expected) return
         val request = candidateCoordinator.snapshot(session)
         queueEdit {
-            if (!candidateCoordinator.canChoose(request, session, candidate, index) ||
-                !pinyin.select(candidate, !sensitive && preferences.getBoolean("learning", true)) ||
-                !candidateCoordinator.canChoose(request, session, candidate, index)) return@queueEdit
-            trace("choose token=${candidate.token} index=${candidate.nativeIndex} consumed=${candidate.consumed} learn=${!sensitive}")
-            expandedCandidates = false
-            commit(outputText(session.choose(index))); requestCandidates()
+            if (!candidateCoordinator.canChoose(request, session, candidate, index)) return@queueEdit
+            applyInput(inputFlow.select(index, ""))
         }
     }
     private fun moveCursor(steps: Int) = queueEdit {
-        finishEnglish()
-        if (session.composition.isNotEmpty()) {
-            session.moveCursor(session.cursor + steps); renderCandidates()
-            trace("move composition cursor=${session.cursor} length=${session.composition.length}")
-            return@queueEdit
-        }
-        val connection = currentInputConnection ?: return@queueEdit
-        if (selectionStart < 0) return@queueEdit
+        applyInput(inputFlow.moveCursor(steps))
+    }
+    private fun moveHostCursor(steps: Int) {
+        val connection = currentInputConnection ?: return
+        if (selectionStart < 0) return
         val extracted = connection.getExtractedText(android.view.inputmethod.ExtractedTextRequest(), 0)
         if (extracted == null) {
             val code = if (steps < 0) KeyEvent.KEYCODE_DPAD_LEFT else KeyEvent.KEYCODE_DPAD_RIGHT
@@ -867,7 +717,7 @@ class LearningKeyboardService : InputMethodService() {
                 connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_DOWN, code))
                 connection.sendKeyEvent(KeyEvent(KeyEvent.ACTION_UP, code))
             }
-            return@queueEdit
+            return
         }
         val text = extracted.text.toString()
         val anchor = if (steps < 0) minOf(selectionStart, selectionEnd) else maxOf(selectionStart, selectionEnd)
@@ -894,29 +744,13 @@ class LearningKeyboardService : InputMethodService() {
         }
     }
     private fun literal(value: String) {
-        if (handwritingMode) {
-            queueEdit { if (resolveHandwriting()) commit(value) }
-            return
-        }
-        if (session.mode == KeyboardMode.ENGLISH) {
-            queueEdit { finishEnglish(); commit(value); autoCapitalization(); renderKeys(); renderCandidates() }
-            return
-        }
-        resolve(CompositionBoundary.LITERAL) { session.literal(value) }
+        queueEdit { if (resolveHandwriting()) boundaryNow(CompositionBoundary.LITERAL, value) }
     }
     private fun enter() = queueEdit {
         if (handwritingMode) {
             if (!resolveHandwriting()) return@queueEdit
         }
-        finishEnglish()
-        if (session.composition.isNotEmpty()) resolveNow(CompositionBoundary.ENTER) { session.enter() }
-        else {
-            val info = currentInputEditorInfo
-            val action = (info?.imeOptions ?: 0) and EditorInfo.IME_MASK_ACTION
-            if ((info?.imeOptions ?: 0) and EditorInfo.IME_FLAG_NO_ENTER_ACTION == 0 && action !in listOf(EditorInfo.IME_ACTION_NONE, EditorInfo.IME_ACTION_UNSPECIFIED))
-                currentInputConnection?.performEditorAction(action)
-            else commit("\n")
-        }
+        boundaryNow(CompositionBoundary.ENTER)
     }
     private fun backspace() = queueEdit {
         if (handwritingMode) {
@@ -926,22 +760,16 @@ class LearningKeyboardService : InputMethodService() {
             }
             if (handwriting.hasStrokes) { handwriting.undo(); return@queueEdit }
         }
-        if (englishWord.isNotEmpty()) {
-            englishWord = englishWord.dropLast(1); englishChoices = emptyList(); syncComposing(); renderCandidates(); return@queueEdit
-        }
-        if (session.backspace()) { requestCandidates(); return@queueEdit }
-        val selected = currentInputConnection?.getSelectedText(0)
-        if (!selected.isNullOrEmpty()) currentInputConnection?.commitText("", 1)
-        else currentInputConnection?.deleteSurroundingTextInCodePoints(1, 0)
-        updateTranslation()
+        applyInput(inputFlow.backspace())
     }
     private fun commit(text: String) {
         if (text.isEmpty()) return
+        val connection = currentInputConnection ?: return
         val start = if (composing) composingStart else minOf(selectionStart, selectionEnd)
         expectedSelection = if (start >= 0) start + text.length else null
-        currentInputConnection?.commitText(text, 1)
+        if (!connection.commitText(text, 1)) { expectedSelection = null; return }
         composing = false; composingStart = -1
-        lastCommit = if (sensitive) "" else text; undoSelection = expectedSelection ?: -1
+        inputFlow.recordCommit(text, EditorSnapshot("", expectedSelection?.toLong() ?: -1), !sensitive && expectedSelection != null)
         expectedSelection?.let { selectionStart = it; selectionEnd = it }
         updateTranslation()
     }
@@ -958,14 +786,13 @@ class LearningKeyboardService : InputMethodService() {
     }
     override fun onStartInput(attribute: EditorInfo?, restarting: Boolean) {
         super.onStartInput(attribute, restarting)
+        resetEditQueue()
         languagePopup?.dismiss(); languagePopup = null; closeTools()
         clearHandwriting()
         handwritingMode = false; handwriting.reset()
         cancelComposing()
-        englishWord = ""; englishChoices = emptyList(); capsLock = false
-        lastCommit = ""; undoSelection = -1; lastSpace = 0L; lastShift = 0L
-        editorEpoch++; editActionJob?.cancel(); editActionJob = null
-        invalidateCandidates(); session.reset(); controller.reset(); expectedSelection = null
+        inputFlow.reset()
+        invalidateCandidates(); controller.reset(); expectedSelection = null
         selectionStart = attribute?.initialSelStart ?: -1; selectionEnd = attribute?.initialSelEnd ?: -1
         val type = attribute?.inputType ?: 0
         val hintedLanguage = attribute?.hintLocales?.takeUnless { it.isEmpty }?.get(0)?.language
@@ -986,8 +813,8 @@ class LearningKeyboardService : InputMethodService() {
         }
         signedNumber = type and InputType.TYPE_NUMBER_FLAG_SIGNED != 0
         decimalNumber = type and InputType.TYPE_NUMBER_FLAG_DECIMAL != 0
-        predictions = emptyList(); expandedCandidates = false
-        session.setAutoCorrection(preferences.getBoolean("autoCorrection", true))
+        expandedCandidates = false
+        inputFlow.setCorrection(preferences.getBoolean("autoCorrection", true))
         sensitive = password || number || ((attribute?.imeOptions ?: 0) and EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING != 0)
         val saved = runCatching { KeyboardMode.valueOf(preferences.getString("mode", KeyboardMode.CHINESE_QWERTY.name)!!) }.getOrDefault(KeyboardMode.CHINESE_QWERTY)
         val englishHint = hintedLanguage == "en"
@@ -1008,6 +835,7 @@ class LearningKeyboardService : InputMethodService() {
         } else if (!ownCommit && (oldStart != newStart || oldEnd != newEnd) &&
             (session.composition.isNotEmpty() || englishWord.isNotEmpty() || handwritingWord.isNotEmpty() ||
                 handwritingCandidate.isNotEmpty() || (handwritingMode && handwriting.hasStrokes))) {
+            resetEditQueue()
             if ((englishWord.isNotEmpty() || handwritingWord.isNotEmpty()) && composing) {
                 // The editor has already moved its selection. Finalize the visible
                 // word in place; replacing composing text here would delete it or
@@ -1016,8 +844,7 @@ class LearningKeyboardService : InputMethodService() {
                 composing = false; composingStart = -1
             } else cancelComposing()
             clearHandwriting()
-            englishWord = ""; englishChoices = emptyList()
-            session.clearComposition(); invalidateCandidates(); renderCandidates()
+            inputFlow.reset(); invalidateCandidates(); renderCandidates()
         }
         updateTranslation()
     }
@@ -1029,9 +856,9 @@ class LearningKeyboardService : InputMethodService() {
             KeyEvent.KEYCODE_ENTER -> { enter(); return true }
             KeyEvent.KEYCODE_ESCAPE -> {
                 queueEdit {
-                    cancelComposing(); englishWord = ""; englishChoices = emptyList()
+                    cancelComposing()
                     clearHandwriting()
-                    session.clearComposition(); invalidateCandidates(); renderCandidates()
+                    applyInput(inputFlow.clearComposition())
                 }
                 return true
             }
@@ -1048,12 +875,12 @@ class LearningKeyboardService : InputMethodService() {
     }
     override fun onEvaluateFullscreenMode() = false
     override fun onFinishInputView(finishingInput: Boolean) {
+        resetEditQueue()
         languagePopup?.dismiss(); languagePopup = null
         if (englishWord.isNotEmpty()) commit(englishWord)
         finishHandwriting()
-        closeTools(); cancelComposing(); englishWord = ""; englishChoices = emptyList()
-        editorEpoch++; editActionJob?.cancel(); editActionJob = null
-        session.clearComposition(); invalidateCandidates(); controller.reset()
+        closeTools(); cancelComposing(); inputFlow.reset()
+        invalidateCandidates(); controller.reset()
         scope.launch { engine.close() }; super.onFinishInputView(finishingInput)
     }
     override fun onDestroy() {
@@ -1061,6 +888,7 @@ class LearningKeyboardService : InputMethodService() {
         preferences.unregisterOnSharedPreferenceChangeListener(keyboardListener)
         (getSystemService(CLIPBOARD_SERVICE) as ClipboardManager).removePrimaryClipChangedListener(clipListener)
         closeTools()
+        invalidateCandidates()
         handwriting.close()
         controller.reset(); scope.cancel()
         CoroutineScope(Dispatchers.Default).launch { engine.close() }
@@ -1083,50 +911,17 @@ class LearningKeyboardService : InputMethodService() {
         composing = false; composingStart = -1
     }
     private suspend fun finishEnglish(value: String = englishWord) {
-        if (englishWord.isEmpty()) return
-        candidateJob?.cancel(); candidateJob = null
-        englishWord = ""; englishChoices = emptyList()
-        commit(value)
+        applyInput(inputFlow.finishEnglish(value))
     }
     private fun shift() {
-        val now = android.os.SystemClock.uptimeMillis()
-        if (now - lastShift < 350) {
-            capsLock = true
-            if (!session.uppercase) session.toggleShift()
-        } else { capsLock = false; session.toggleShift() }
-        lastShift = now
+        inputFlow.shift(android.os.SystemClock.uptimeMillis())
     }
     private fun autoCapitalization() {
-        if (session.mode != KeyboardMode.ENGLISH || capsLock || sensitive || inputScene != "text" || !preferences.getBoolean("autoCap", true)) return
         val before = currentInputConnection?.getTextBeforeCursor(80, 0)?.toString().orEmpty()
-        val capital = KeyboardPolicy.capitalize(before)
-        if (session.uppercase != capital) session.toggleShift()
+        if (inputFlow.capitalize(before, inputOptions())) renderKeys()
     }
     private fun space() = queueEdit {
-        if (handwritingMode) {
-            if (!resolveHandwriting()) return@queueEdit
-            commit(" ")
-            return@queueEdit
-        }
-        if (session.mode == KeyboardMode.ENGLISH) {
-            val raw = englishWord
-            val result = if (raw.isNotEmpty() && preferences.getBoolean("englishCorrection", false)) withContext(Dispatchers.Default) {
-                englishDictionary().correction(raw)
-            } else raw
-            finishEnglish(result)
-            val now = android.os.SystemClock.uptimeMillis()
-            val previous = currentInputConnection?.getTextBeforeCursor(3, 0)?.toString().orEmpty()
-            if (preferences.getBoolean("doubleSpace", false) && KeyboardPolicy.doubleSpace(previous, now - lastSpace)) {
-                currentInputConnection?.deleteSurroundingTextInCodePoints(1, 0); commit(". ")
-            } else commit(" ")
-            lastSpace = now; autoCapitalization(); renderKeys(); renderCandidates()
-        } else if (session.composition.isEmpty() && preferences.getBoolean("doubleSpace", false)) {
-            val now = android.os.SystemClock.uptimeMillis()
-            if (KeyboardPolicy.doubleSpace(currentInputConnection?.getTextBeforeCursor(3, 0)?.toString().orEmpty(), now - lastSpace)) {
-                currentInputConnection?.deleteSurroundingTextInCodePoints(1, 0); commit("。")
-            } else commit(" ")
-            lastSpace = now
-        } else resolveNow(CompositionBoundary.SPACE) { session.space() }
+        if (resolveHandwriting()) boundaryNow(CompositionBoundary.SPACE)
     }
     private fun applyLayout() {
         if (!::keyboardRoot.isInitialized) return
@@ -1172,17 +967,16 @@ class LearningKeyboardService : InputMethodService() {
         scroll.addView(bar); parent.addView(scroll)
     }
     private fun showTool(name: String) = queueEdit {
-        finishEnglish()
         if (!resolveHandwriting()) return@queueEdit
-        if (session.composition.isNotEmpty()) {
-            resolveNow(CompositionBoundary.SPACE) { session.space() }
-            if (session.composition.isNotEmpty()) return@queueEdit
-        }
+        if (!awaitCandidates()) return@queueEdit
+        applyInput(inputFlow.prepareTool(name))
+    }
+    private fun presentTool(name: String) {
         closeTools()
         if (name == "手写" || name == "键盘") {
             handwritingMode = name == "手写"
             renderKeys(); renderCandidates()
-            return@queueEdit
+            return
         }
         panels.show(name, keys, ui)
     }
@@ -1196,19 +990,16 @@ class LearningKeyboardService : InputMethodService() {
             "←" -> moveCursor(-1)
             "→" -> moveCursor(1)
             "按词删除" -> queueEdit {
-                val text = currentInputConnection?.getTextBeforeCursor(200, 0)?.toString().orEmpty()
-                val count = KeyboardPolicy.deleteWord(text)
-                currentInputConnection?.deleteSurroundingTextInCodePoints(count.codePointCount(0, count.length), 0); updateTranslation()
+                applyInput(inputFlow.edit(KeyboardEditCommand.DELETE_WORD, editorSnapshot()))
             }
             "撤销" -> queueEdit {
-                val before = currentInputConnection?.getTextBeforeCursor(lastCommit.length, 0)?.toString()
-                if (lastCommit.isNotEmpty() && selectionStart == selectionEnd && selectionStart == undoSelection && before == lastCommit) {
-                    currentInputConnection?.deleteSurroundingTextInCodePoints(lastCommit.codePointCount(0, lastCommit.length), 0)
-                    lastCommit = ""; updateTranslation()
-                }
+                applyInput(inputFlow.edit(KeyboardEditCommand.UNDO, editorSnapshot()))
             }
         }
     }
+    private fun editorSnapshot() = EditorSnapshot(
+        currentInputConnection?.getTextBeforeCursor(maxOf(200, inputFlow.committedLength), 0)?.toString().orEmpty(),
+        selectionStart.toLong(), selectionStart == selectionEnd)
     private fun forgetCandidate(candidate: PinyinCandidate) {
         if (sensitive || candidate.spelling.isEmpty()) return
         queueEdit {

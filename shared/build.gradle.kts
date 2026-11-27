@@ -4,6 +4,7 @@ kotlin {
     jvm()
     iosArm64 { binaries.framework { baseName = "Shared"; isStatic = true } }
     iosSimulatorArm64 { binaries.framework { baseName = "Shared"; isStatic = true } }
+    applyDefaultHierarchyTemplate()
     sourceSets {
         commonMain.dependencies { implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.2") }
         commonTest.dependencies { implementation(kotlin("test")); implementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.10.2") }

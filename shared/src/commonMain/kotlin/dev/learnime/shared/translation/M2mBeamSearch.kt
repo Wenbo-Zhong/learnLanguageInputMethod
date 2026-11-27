@@ -23,19 +23,19 @@ class M2mBeamSearch(targetId: Int) {
         candidates.sortByDescending { it.score }
         val next = mutableListOf<M2mBeam>()
         for ((rank, candidate) in candidates.withIndex()) {
-            if (candidate.lastToken == 2) {
-                if (rank < 5) {
+            if (candidate.lastToken == M2mModelSpec.eos) {
+                if (rank < M2mModelSpec.beamWidth) {
                     finished += M2mBeam(candidate.score / candidate.tokens.size,
                         candidate.tokens.drop(1).dropLast(1), candidate.state)
                 }
             } else {
                 next += candidate
             }
-            if (next.size == 5) break
+            if (next.size == M2mModelSpec.beamWidth) break
         }
         finished.sortByDescending { it.score }
-        if (finished.size > 5) finished.subList(5, finished.size).clear()
-        done = finished.size == 5 || next.isEmpty()
+        if (finished.size > M2mModelSpec.beamWidth) finished.subList(M2mModelSpec.beamWidth, finished.size).clear()
+        done = finished.size == M2mModelSpec.beamWidth || next.isEmpty()
         beams = next
         candidates.clear()
     }

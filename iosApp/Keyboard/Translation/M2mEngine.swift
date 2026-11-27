@@ -92,7 +92,8 @@ final class M2mEngine {
         guard try integer() == 0x4D324D32 else { throw M2mError.failed("M2M100 词表版本无效") }
         let size = try integer(); vocabulary = try integer()
         let pieces = try integer(); chinese = try integer(); english = try integer()
-        guard size == 128000, vocabulary == 128112, pieces == 128004, chinese == 128102, english == 128022 else {
+        guard M2mModelSpec.shared.matchesVocabulary(size: size, modelSize: vocabulary,
+            pieceCount: pieces, chineseId: chinese, englishId: english) else {
             throw M2mError.failed("M2M100 词表与模型不匹配")
         }
         var inputMap = [Int32]()
@@ -128,7 +129,8 @@ final class M2mEngine {
         guard request == revision, let runtime else { lock.unlock(); throw M2mError.cancelled }
         li_ort_begin(runtime); lock.unlock()
         guard let tokenizer else { throw M2mError.failed("M2M100 词表尚未加载") }
-        var ids = [Int32](repeating: 0, count: 254)
+        let capacity = Int(M2mModelSpec.shared.maxInputTokens) - 2
+        var ids = [Int32](repeating: 0, count: capacity)
         let utf8 = Array(source.utf8)
         let count = utf8.withUnsafeBytes { bytes in
             ids.withUnsafeMutableBufferPointer {
@@ -137,18 +139,18 @@ final class M2mEngine {
             }
         }
         guard count >= 0 else { throw M2mError.failed("M2M100 输入编码失败") }
-        guard count <= 254 else { throw M2mError.failed("句子太长，请分句翻译") }
-        let encoded = [Int64(reverse ? english : chinese)] + ids.prefix(Int(count)).map { Int64(forward[Int($0)]) } + [2]
+        guard count <= capacity else { throw M2mError.failed("句子太长，请分句翻译") }
+        let encoded = [Int64(reverse ? english : chinese)] + ids.prefix(Int(count)).map { Int64(forward[Int($0)]) } + [Int64(M2mModelSpec.shared.eos)]
         let input = try OrtTensor(encoded, shape: [1, Int64(encoded.count)], type: 7)
         let mask = try OrtTensor([Int64](repeating: 1, count: encoded.count), shape: [1, Int64(encoded.count)], type: 7)
         let hidden = try run(decoder: false, inputs: [("input_ids", input.handle), ("attention_mask", mask.handle)])
         try current(request)
         let empty = try OrtTensor([Float](), shape: [1, 16, 0, 64], type: 1)
-        let first = try step(2, hidden: hidden, mask: mask, empty: empty, cross: nil, state: nil)
+        let first = try step(M2mModelSpec.shared.eos, hidden: hidden, mask: mask, empty: empty, cross: nil, state: nil)
         let search = M2mBeamSearch(targetId: reverse ? chinese : english)
         var states = [Int32: OrtResult](), nextState: Int32 = 1
         let started = Date()
-        for position in 0..<128 {
+        for position in 0..<Int(M2mModelSpec.shared.maxOutputTokens) {
             for beam in search.beams {
                 try current(request)
                 let next = try step(beam.lastToken, hidden: hidden, mask: mask, empty: empty,

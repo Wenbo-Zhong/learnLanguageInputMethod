@@ -2,6 +2,7 @@ package dev.learnime.android
 
 import android.content.Context
 import dev.learnime.shared.TranslationEngine
+import dev.learnime.shared.OpusModelSpec
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -35,9 +36,9 @@ internal class OpusEngine(context: Context) : TranslationEngine {
         mutex.withLock {
             val request = cancelRevision.get()
             ensureLoaded()
-            val encoded = NativeSentencePiece.encodeUtf8(tokenizer, source.toByteArray(Charsets.UTF_8))
-                .take(MAX_TOKENS - 1).toMutableList().apply { add(EOS) }
-            require(encoded.isNotEmpty()) { "请输入中文句子" }
+            val tokens = NativeSentencePiece.encodeUtf8(tokenizer, source.toByteArray(Charsets.UTF_8))
+            OpusModelSpec.sourceError(tokens.size)?.let { throw IllegalArgumentException(it) }
+            val encoded = tokens.toMutableList().apply { add(EOS) }
             val ids = IntArray(MAX_TOKENS) { PAD }.also { out -> encoded.forEachIndexed { i, id -> out[i] = id } }
             // This model's pad_mask is added to attention logits, not a 0/1 keep mask.
             val mask = FloatArray(MAX_TOKENS) { i -> if (i < encoded.size) 0f else MASKED_ATTENTION }
@@ -84,9 +85,18 @@ internal class OpusEngine(context: Context) : TranslationEngine {
         if (interpreter != null) return
         val files = ModelStore.prepare(app)
         val model = FileInputStream(files.model).channel.use { it.map(FileChannel.MapMode.READ_ONLY, 0, files.model.length()) }
-        interpreter = Interpreter(model, Interpreter.Options().apply { setNumThreads(4) })
-        tokenizer = NativeSentencePiece.create(files.sourceSpm.absolutePath.toByteArray(Charsets.UTF_8))
-        check(tokenizer != 0L) { "SentencePiece 词表加载失败" }
+        val loaded = Interpreter(model, Interpreter.Options().apply { setNumThreads(4) })
+        var loadedTokenizer = 0L
+        try {
+            loadedTokenizer = NativeSentencePiece.create(files.sourceSpm.absolutePath.toByteArray(Charsets.UTF_8))
+            check(loadedTokenizer != 0L) { "SentencePiece 词表加载失败" }
+            interpreter = loaded
+            tokenizer = loadedTokenizer
+        } catch (error: Throwable) {
+            if (loadedTokenizer != 0L) NativeSentencePiece.destroy(loadedTokenizer)
+            loaded.close()
+            throw error
+        }
     }
 
     private fun decoderInputs(token: Int, position: Int, hidden: Array<Array<FloatArray>>, mask: FloatArray,
@@ -117,20 +127,15 @@ internal class OpusEngine(context: Context) : TranslationEngine {
     }
 
     private companion object {
-        const val MAX_TOKENS = 256
-        const val HIDDEN = 256
-        const val HEADS = 8
-        const val HEAD_SIZE = 32
-        const val VOCAB = 32001
-        const val EOS = 0
-        const val START = 32000
-        const val PAD = 32000
-        const val MASKED_ATTENTION = -1.0e9f
-        val CACHE_NAMES = listOf(
-            "cross_attn_kv_cache_k_0", "cross_attn_kv_cache_k_1",
-            "cross_attn_kv_cache_v_0", "cross_attn_kv_cache_v_1",
-            "self_attn_kv_cache_k_0", "self_attn_kv_cache_k_1",
-            "self_attn_kv_cache_v_0", "self_attn_kv_cache_v_1",
-        )
+        const val MAX_TOKENS = OpusModelSpec.maxTokens
+        const val HIDDEN = OpusModelSpec.hidden
+        const val HEADS = OpusModelSpec.heads
+        const val HEAD_SIZE = OpusModelSpec.headSize
+        const val VOCAB = OpusModelSpec.vocabulary
+        const val EOS = OpusModelSpec.eos
+        const val START = OpusModelSpec.start
+        const val PAD = OpusModelSpec.pad
+        const val MASKED_ATTENTION = OpusModelSpec.maskedAttention
+        val CACHE_NAMES = OpusModelSpec.cacheNames
     }
 }

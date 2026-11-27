@@ -81,6 +81,7 @@ class KeyboardSession {
         clearComposition(); mode = value; symbols = false; uppercase = false
     }
     fun clearComposition() { composition = ""; cursor = 0; lockedSyllables = emptyList(); edited() }
+    fun clearCandidates() { candidates = emptyList() }
     fun reset() { clearComposition(); symbols = false; uppercase = false }
     fun toggleShift() { uppercase = !uppercase }
     fun toggleSymbols() { symbols = !symbols }

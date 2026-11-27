@@ -2,6 +2,7 @@
 
 The modified native dependencies are included as source snapshots under
 `third_party/`. Model and dictionary weights are excluded from Git.
+See [architecture.md](architecture.md) for shared rules and platform feature paths.
 
 ## Android
 

@@ -10,6 +10,7 @@ import android.util.Log
 import dev.learnime.shared.TranslationEngine
 import dev.learnime.shared.TranslationDirection
 import dev.learnime.shared.M2mBeamSearch
+import dev.learnime.shared.M2mModelSpec
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
@@ -207,8 +208,8 @@ internal class M2mEngine(context: Context) : TranslationEngine {
                 vocabularySize = input.readInt()
                 chineseId = input.readInt()
                 englishId = input.readInt()
-                check(spSize == 128000 && modelSize == 128112 && vocabularySize == 128004 &&
-                    chineseId == 128102 && englishId == 128022) { "M2M100 词表不匹配" }
+                check(M2mModelSpec.matchesVocabulary(spSize, modelSize, vocabularySize,
+                    chineseId, englishId)) { "M2M100 词表不匹配" }
                 forward = IntArray(spSize) { input.readInt() }
                 modelVocabularySize = modelSize
                 outputPieces = Array(vocabularySize) {
@@ -269,10 +270,10 @@ internal class M2mEngine(context: Context) : TranslationEngine {
 
     private companion object {
         const val TAG = "LEARNIME_M2M_TRACE"
-        const val EOS = 2
-        const val LAYERS = 12
-        const val BEAM_WIDTH = 5
-        const val MAX_INPUT_TOKENS = 256
-        const val MAX_OUTPUT_TOKENS = 128
+        const val EOS = M2mModelSpec.eos
+        const val LAYERS = M2mModelSpec.layers
+        const val BEAM_WIDTH = M2mModelSpec.beamWidth
+        const val MAX_INPUT_TOKENS = M2mModelSpec.maxInputTokens
+        const val MAX_OUTPUT_TOKENS = M2mModelSpec.maxOutputTokens
     }
 }

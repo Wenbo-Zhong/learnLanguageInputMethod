@@ -7,6 +7,8 @@ local.properties
 **/.git/
 .idea/
 .screenshots/
+.trae-html-share-packages/
+reports/
 /.attachments/
 /*.png
 /*.log
@@ -21,6 +23,7 @@ docs/
 docs/*
 !docs/building.md
 !docs/project-status.md
+!docs/architecture.md
 models/**/*.tflite
 models/**/*.spm
 input-data/libime/*.dict

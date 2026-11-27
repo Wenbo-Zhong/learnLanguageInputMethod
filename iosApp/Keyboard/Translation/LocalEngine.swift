@@ -97,12 +97,16 @@ final class LocalEngine {
             throw EngineError.failed("翻译模型尚未加载")
         }
         var encoded = [Int32](repeating: 0, count: Self.maxTokens - 1)
-        let count = source.withCString { text in
+        let utf8 = Array(source.utf8)
+        let count = utf8.withUnsafeBytes { text in
             encoded.withUnsafeMutableBufferPointer { buffer in
-                li_sentencepiece_encode(tokenizer, text, buffer.baseAddress, buffer.count)
+                li_sentencepiece_encode_utf8(tokenizer, text.baseAddress?.assumingMemoryBound(to: CChar.self),
+                                             text.count, buffer.baseAddress, buffer.count)
             }
         }
-        guard count > 0 else { throw EngineError.failed("请输入中文句子") }
+        if let message = OpusModelSpec.shared.sourceError(tokenCount: Int32(clamping: count)) {
+            throw EngineError.failed(message)
+        }
         encoded = Array(encoded.prefix(Int(count))); encoded.append(Self.eos)
         var ids = [Int32](repeating: Self.pad, count: Self.maxTokens)
         ids.replaceSubrange(0..<encoded.count, with: encoded)
@@ -173,7 +177,7 @@ final class LocalEngine {
     private static func argmax(_ data: Data) throws -> Int32 {
         try data.withUnsafeBytes { raw in
             let values = raw.bindMemory(to: Float.self)
-            guard values.count == 32001, values.allSatisfy(\.isFinite) else {
+            guard values.count == Int(OpusModelSpec.shared.vocabulary), values.allSatisfy(\.isFinite) else {
                 throw EngineError.failed("模型输出无效")
             }
             var best = 0
@@ -203,16 +207,11 @@ final class LocalEngine {
         }
     }
 
-    private static let maxTokens = 256
-    private static let eos: Int32 = 0
-    private static let start: Int32 = 32000
-    private static let pad: Int32 = 32000
-    private static let maskedAttention: Float = -1.0e9
-    private static let cacheBytes = 1 * maxTokens * 8 * 32 * MemoryLayout<Float>.size
-    private static let cacheNames = [
-        "cross_attn_kv_cache_k_0", "cross_attn_kv_cache_k_1",
-        "cross_attn_kv_cache_v_0", "cross_attn_kv_cache_v_1",
-        "self_attn_kv_cache_k_0", "self_attn_kv_cache_k_1",
-        "self_attn_kv_cache_v_0", "self_attn_kv_cache_v_1"
-    ]
+    private static let maxTokens = Int(OpusModelSpec.shared.maxTokens)
+    private static let eos = OpusModelSpec.shared.eos
+    private static let start = OpusModelSpec.shared.start
+    private static let pad = OpusModelSpec.shared.pad
+    private static let maskedAttention = OpusModelSpec.shared.maskedAttention
+    private static let cacheBytes = maxTokens * Int(OpusModelSpec.shared.heads) * Int(OpusModelSpec.shared.headSize) * MemoryLayout<Float>.size
+    private static let cacheNames = OpusModelSpec.shared.cacheNames
 }

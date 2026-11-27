@@ -13,8 +13,7 @@ object KeyboardPolicy {
     fun validShortcut(key: String, phrase: String): Boolean = phrase.isNotBlank() && phrase.length <= 1000 &&
         key.matches(Regex("(?:[a-z]{1,20}|[2-9]{1,20})"))
     fun handwritingDelay(speed: String): Long = when (speed) { "fast" -> 600L; "slow" -> 1600L; else -> 1000L }
-    fun deleteWord(context: String): String =
-        Regex("(?:\\s+|[\\p{L}\\p{N}]+\\s*|[^\\p{L}\\p{N}\\s])$").find(context)?.value.orEmpty()
+    fun deleteWord(context: String): String = WordBoundary.tail(context)
 }
 
 data class ClipboardRecord(val text: String, val timestamp: Long, val pinned: Boolean)
